@@ -71,6 +71,12 @@ class PageHorizontalRule final : public PageElement {
 };
 
 class Page {
+  enum class ImageState {
+    UNKNOWN,
+    YES,
+    NO,
+  };
+  ImageState _has_images{ImageState::UNKNOWN};
  public:
   // the list of block index and line numbers on this page
   std::vector<std::shared_ptr<PageElement>> elements;
@@ -92,9 +98,12 @@ class Page {
   static std::unique_ptr<Page> deserialize(HalFile& file);
 
   // Check if page contains any images (used to force full refresh)
-  bool hasImages() const {
-    return std::any_of(elements.begin(), elements.end(),
-                       [](const std::shared_ptr<PageElement>& el) { return el->getTag() == TAG_PageImage; });
+  bool hasImages() {
+    if (this->_has_images == ImageState::UNKNOWN) {
+      this->_has_images = std::any_of(elements.begin(), elements.end(),
+                       [](const std::shared_ptr<PageElement>& el) { return el->getTag() == TAG_PageImage; }) ? ImageState::YES : ImageState::NO;
+    }
+    return this->_has_images == ImageState::YES;
   }
 
   // Get bounding box of all images on the page (union of image rects)
