@@ -1180,6 +1180,21 @@ void GfxRenderer::invertScreen() const {
 void GfxRenderer::displayBuffer(const HalDisplay::RefreshMode refreshMode) const {
   auto elapsed = millis() - start_ms;
   LOG_DBG("GFX", "Time = %lu ms from clearScreen to displayBuffer", elapsed);
+
+  // Try drawing a line to see which direction the screen/framebuffer go
+  //
+  // So: (in normal portrait orientation)
+  // - (fb[0] & (1<<7)) is top-right corner
+  // - fb grows downward on screen, then right to left
+  // - within each byte bit order is decreasing
+  //
+  //
+  // static int line = 0;
+  // for (auto i=0; i<line; ++i) {
+  //   frameBuffer[(3200/8)+(i/8)] &= ~(1 << (7 - (i % 8)));
+  // }
+  // line += 5;
+
   display.displayBuffer(refreshMode, fadingFix);
 }
 
