@@ -159,12 +159,12 @@ The compiler will eliminate dead branches (e.g., the `switch` for `orientation` 
 
 ## Expected Performance Improvement
 
-| Metric | Before | After | Improvement |
-|--------|--------|-------|-------------|
-| Function calls per 12×20 glyph | 240 | ~0 | Eliminated |
-| RMW operations per 12×20 glyph | 240 | ~30 (5 bytes × 2 planes) | **8× fewer** |
-| Orientation switch hits | 240 | 0 | Eliminated |
-| Bounds check hits | 240 | 0 (hoisted) | Eliminated |
+| Metric                         | Before | After                    | Improvement  |
+|--------------------------------|--------|--------------------------|--------------|
+| Function calls per 12×20 glyph | 240    | ~0                       | Eliminated   |
+| RMW operations per 12×20 glyph | 240    | ~30 (5 bytes × 2 planes) | **8× fewer** |
+| Orientation switch hits        | 240    | 0                        | Eliminated   |
+| Bounds check hits              | 240    | 0 (hoisted)              | Eliminated   |
 
 ## Key Considerations
 
