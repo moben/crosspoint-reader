@@ -46,49 +46,46 @@ static void renderCharRow2Bit(const uint8_t* restrict fb,
 
 ### 2. Per-Byte Processing (1-bit)
 
+1-bit fonts have only black and white glyphs — no gray levels. The grayscale passes (GRAYSCALE_LSB, GRAYSCALE_MSB) are no-ops for 1-bit fonts and are never invoked. Only the BW pass executes.
+
 For each framebuffer byte in `[byteStart, byteEnd]`:
 
 ```cpp
 // Extract 8 pixels from bitmap, pack into ink mask
-uint8_t inkMask = 0;
+uint8_t mask = 0;
 for (int p = 0; p < 8; p++) {
     if (pixelIdx < glyphWidth) {
         uint8_t byte = bitmap[pixelIdx >> 3];
         if ((byte >> (7 - (pixelIdx & 7))) & 1)
-            inkMask |= (1 << (7 - p));  // MSB-first, aligns with FB
+            mask |= (1 << (7 - p));  // MSB-first, aligns with FB
         pixelIdx++;
     }
 }
 
 // Apply head mask (first byte): clear bits left of glyph start
-inkMask &= headMask;
+mask &= headMask;
 
 // Apply tail mask (last byte): clear bits right of glyph end
-inkMask &= tailMask;
+mask &= tailMask;
 
-// Single RMW — mode-specific
-switch (renderMode) {
-    case BW:
-        fb[rowOffset] = (fb[rowOffset] & ~inkMask) | (inkMask & drawMask);
-        break;
-    case GRAY_MSB:
-        fb[rowOffset] = (fb[rowOffset] & ~inkMask) | (inkMask & msbMask);
-        break;
-    case GRAY_LSB:
-        fb[rowOffset] = (fb[rowOffset] & ~inkMask) | (inkMask & lsbMask);
-        break;
-}
+// Single RMW — BW only (grayscale passes are no-ops for 1-bit)
+// FB bit: 0 = ink (black), 1 = no-ink (white)
+// mask has 1-bits where pixels should be drawn → clear those bits
+fb[rowOffset] &= ~mask;
 ```
 
 ### 3. Per-Byte Processing (2-bit)
 
+2-bit fonts carry 4 gray levels (val 0–3). The function is called **once per render pass**
+(BW, then GRAYSCALE_LSB, then GRAYSCALE_MSB) — each pass computes only the mask relevant
+to its mode. The `renderMode` template parameter is a compile-time constant, so the compiler
+eliminates dead branches.
+
 For each framebuffer byte in `[byteStart, byteEnd]`:
 
 ```cpp
-// Extract 8 pixels from bitmap (2 bytes), build dark/light masks per bit position
-uint8_t darkMask = 0;   // bit set for black(val=3) or dark gray(val=2)
-uint8_t lightMask = 0;  // bit set for dark gray(val=2) or light gray(val=1)
-
+// Extract 8 pixels from bitmap (2 bytes), build mask per bit position
+uint8_t mask = 0;
 for (int p = 0; p < 8; p++) {          // 8 pixels per framebuffer byte
     if (pixelIdx < glyphWidth) {
         uint8_t byte = bitmap[pixelIdx >> 2];
@@ -96,32 +93,47 @@ for (int p = 0; p < 8; p++) {          // 8 pixels per framebuffer byte
         // val: 0=white, 1=light gray, 2=dark gray, 3=black
 
         uint8_t fbBit = 7 - p;         // MSB-first, aligns with FB
-        if (val >= 2) darkMask |= (1 << fbBit);           // black or dark gray
-        if (val >= 1 && val <= 2) lightMask |= (1 << fbBit);  // dark or light gray
 
+        // constexpr-if: only compute mask bits relevant to this pass
+        if constexpr (renderMode == GfxRenderer::BW) {
+            // BW pass: draw all non-white pixels (val < 3)
+            if (val < 3) mask |= (1 << fbBit);
+        } else {
+            // GRAYSCALE_LSB: draw dark gray only (val == 2)
+            // GRAYSCALE_MSB: draw dark + light gray (val == 1 || val == 2)
+            if constexpr (renderMode == GfxRenderer::GRAYSCALE_LSB) {
+                if (val == 2) mask |= (1 << fbBit);
+            } else {  // GRAYSCALE_MSB
+                if (val == 1 || val == 2) mask |= (1 << fbBit);
+            }
+        }
         pixelIdx++;
     }
 }
 
-// Apply head/tail masks (per-bit, not per-nibble — see §6 below)
-darkMask &= headMask;
-darkMask &= tailMask;
-lightMask &= headMask;
-lightMask &= tailMask;
+// Apply head/tail masks (per-bit, same as 1-bit — see §6 below)
+mask &= headMask;
+mask &= tailMask;
+
+// Single RMW — operation direction differs by pass
+// BW:   FB bit 0 = ink → clear drawn bits: fb &= ~mask
+// GRAY: FB bit 1 = gray  → set drawn bits: fb |=  mask
+if constexpr (renderMode == GfxRenderer::BW) {
+    fb[rowOffset] &= ~mask;
+} else {
+    fb[rowOffset] |= mask;
+}
 ```
 
-**Grayscale is rendered in three separate passes** over the same glyph row.
-`GfxRenderer` has only one `frameBuffer`. Grayscale planes are created by copying the
-same buffer to different display RAM (`copyGrayscaleLsbBuffers` → BW RAM,
-`copyGrayscaleMsbBuffers` → RED RAM). Each render pass writes its own masks:
+**Why the operation direction flips**: The framebuffer bit meaning is inverted between
+BW and grayscale passes. In BW mode, `drawPixel(x, y, true)` clears the bit (0 = ink).
+In grayscale passes, `drawPixel(x, y, false)` sets the bit (1 = gray). The optimized
+code mirrors this: BW clears bits (`& ~mask`), grayscale sets bits (`| mask`).
 
-- **BW**:   `(fb[rowOffset] & ~darkMask) | (drawMask & darkMask)` — black + dark gray + light gray
-- **LSB**:  `(fb[rowOffset] & ~lightMask) | (lsbMask & lightMask)` — dark gray only
-- **MSB**:  `(fb[rowOffset] & ~lightMask) | (msbMask & lightMask)` — dark gray + light gray
-
-For `BW`, the mask selects which pixels to set/clear according to `drawMask` (from the
-`black` parameter). For grayscale passes, `lsbMask`/`msbMask` are both `0xFF` (always
-set bit = ink) because a "gray" pixel always writes ink to its respective plane.
+After the glyph row finishes, `copyGrayscaleLsbBuffers(frameBuffer)` and
+`copyGrayscaleMsbBuffers(frameBuffer)` copy the framebuffer to the two display RAM
+planes. The display hardware interprets the BW+RED combination as 4 gray levels
+(see §3a table).
 
 ### 3a. Grayscale Pass Architecture
 
@@ -132,23 +144,25 @@ via `storeBwBuffer()` and restored after `displayGrayBuffer()` via `restoreBwBuf
 placing it on top of the grayscale planes for final display.
 
 ```cpp
-// Pass 1 — BW (black text overgrays): black + dark gray + light gray
+// Pass 1 — BW (black text overgrays): all non-white pixels
 renderer.setRenderMode(GfxRenderer::BW);
-renderCharRow2Bit<orientation, rotation, BW>(...);             // writes darkMask
+renderCharRow2Bit<orientation, rotation, BW>(...);  // mask = val < 3, fb &= ~mask
 
 // Pass 2 — GRAYSCALE_LSB (BW RAM): dark gray only
 renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
 renderer.clearScreen(0x00);
-renderCharRow2Bit<orientation, rotation, GRAYSCALE_LSB>(...);  // writes lightMask
+renderCharRow2Bit<orientation, rotation, GRAYSCALE_LSB>(...);  // mask = val == 2, fb |= mask
 
 // Pass 3 — GRAYSCALE_MSB (RED RAM): dark + light gray
 renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
 renderer.clearScreen(0x00);
-renderCharRow2Bit<orientation, rotation, GRAYSCALE_MSB>(...);  // writes lightMask
+renderCharRow2Bit<orientation, rotation, GRAYSCALE_MSB>(...);  // mask = val 1||2, fb |= mask
 ```
 
-Each pass independently computes masks and does its own RMW on the shared
-`frameBuffer`. The display hardware then interprets the two RAM planes together:
+Each pass independently computes its mask and does its own RMW on the shared
+`frameBuffer`. After all passes, `copyGrayscaleLsbBuffers` and
+`copyGrayscaleMsbBuffers` copy the framebuffer to the two display RAM planes.
+The display hardware then interprets the two RAM planes together:
 
 | BW RAM | RED RAM | Display color |
 |--------|---------|---------------|
@@ -231,11 +245,10 @@ The head and tail masks isolate only the bits that fall within the glyph's physi
 
 ### Head/Tail Masks — 2-bit Mode (Per-Bit)
 
-**Same approach as 1-bit mode.** The masks operate on individual bit positions within
+**Same approach as 1-bit mode.** The mask operates on individual bit positions within
 each framebuffer byte (8 pixels per byte), not nibble boundaries. This is because the
 fb layout is still **1-bit-per-pixel**; the 2-bit data from the font bitmap is decoded
-into separate `darkMask` and `lightMask` bytes where each bit corresponds to one pixel
-column.
+into a single mask byte where each bit corresponds to one pixel column.
 
 ```cpp
 // Head mask (first byte): clear bits to the left of glyph start
@@ -255,18 +268,23 @@ if (byteStart == byteEnd) {
 ### Grayscale Mode Handling
 
 Grayscale rendering uses **three separate render passes** over the same glyph row, each
-writing masks into the single `frameBuffer`:
+computing only the mask relevant to its pass and writing to the single `frameBuffer`:
 
-| Pass     | RenderMode       | What gets drawn                              | Mask used  | Write action                                  |
-|----------|------------------|----------------------------------------------|------------|-----------------------------------------------|
-| BW       | BW               | Black + dark gray + light gray (val=0,1,2)   | darkMask   | `fb &= ~darkMask; fb |= drawMask & darkMask`  |
-| LSB      | GRAYSCALE_LSB    | Dark gray (val=2) only                       | lightMask  | `fb &= ~lightMask; fb |= lsbMask & lightMask` |
-| MSB      | GRAYSCALE_MSB    | Dark gray + light gray (val=1 or 2)          | lightMask  | `fb &= ~lightMask; fb |= msbMask & lightMask` |
+| Pass     | RenderMode       | What gets drawn              | Mask condition           | FB write action |
+|----------|------------------|------------------------------|--------------------------|-----------------|
+| BW       | BW               | All non-white pixels         | `val < 3`                | `fb &= ~mask`   |
+| LSB      | GRAYSCALE_LSB    | Dark gray only               | `val == 2`               | `fb |= mask`    |
+| MSB      | GRAYSCALE_MSB    | Dark + light gray            | `val == 1 \|\| val == 2` | `fb |= mask`    |
 
-- `lsbMask = 0xFF` in LSB pass — dark gray always writes ink to BW RAM
-- `msbMask = 0xFF` in MSB pass — dark+light gray always write ink to RED RAM
-- `drawMask` is derived from the `black` parameter in BW mode (set bit for black, clear for white)
-- White pixels (val=3) are never drawn — their bits stay at 1 (no ink)
+**Why BW uses `&= ~mask` and grayscale uses `|= mask`**: The framebuffer bit meaning
+inverts between BW and grayscale passes:
+- **BW**: bit 0 = ink, bit 1 = white → drawn pixels get `&= ~mask` (clear to 0)
+- **Grayscale**: bit 0 = no-gray, bit 1 = gray → drawn pixels get `|= mask` (set to 1)
+
+This mirrors the existing `drawPixel()` behavior: `drawPixel(x, y, true)` clears bits
+(BW), `drawPixel(x, y, false)` sets bits (grayscale).
+
+White pixels (val=3) are never drawn in any pass — their bits stay at 1 (no ink/gray).
 
 This three-pass approach matches the existing rendering pipeline: after all glyphs in a
 row are rendered, `copyGrayscaleLsbBuffers(frameBuffer)` and
@@ -300,14 +318,17 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
 
 1. **Create `renderCharRow1Bit`** template — byte-aligned 1-bit row processor with head/tail masks (same as §2)
 2. **Create `renderCharRow2Bit`** template — byte-aligned 2-bit row processor that:
-   - Extracts 8 pixels per framebuffer byte (2 bitmap bytes), builds `darkMask` + `lightMask`
+   - Extracts 8 pixels per framebuffer byte (2 bitmap bytes), builds a single `mask`
+   - Uses `constexpr-if` on `renderMode` to select the mask condition:
+     `val < 3` for BW, `val == 2` for GRAYSCALE_LSB, `val == 1 \|\| val == 2` for GRAYSCALE_MSB
    - Applies head/tail per-bit masks
-   - Performs a single RMW using the precomputed mask and the renderMode-specific write pattern
+   - Performs a single RMW: `fb &= ~mask` for BW, `fb |= mask` for grayscale passes
 3. **Refactor `renderCharImpl`** to:
    - Hoist orientation rotation, strip target, physical coordinates upfront (unchanged)
    - Compute per-row byte range and head/tail masks before the row loop (unchanged)
-   - For 2-bit fonts: call `renderCharRow2Bit` once — the function internally
-     applies the mask pattern for the current `renderMode`, so one call handles all modes
+   - For 2-bit fonts: call `renderCharRow2Bit` once per render pass. The `renderMode`
+     template parameter is a compile-time constant — `constexpr-if` selects the mask
+     condition and FB write operation, so the compiler eliminates dead branches.
    - The **three-pass** architecture from §3a is handled outside this function: the caller
      invokes `renderCharImpl` with BW, then GRAYSCALE_LSB (after clearScreen), then GRAYSCALE_MSB
      (after clearScreen)
