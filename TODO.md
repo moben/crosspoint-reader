@@ -11,7 +11,7 @@ For a typical 12×20 glyph, the current code:
 
 ## Optimization Strategy
 
-Process **whole bytes at a time** (8 pixels for 1-bit, 4 pixels for 2-bit):
+Process **whole bytes at a time** (8 pixels for 1-bit, 8 pixels for 2-bit — two bitmap bytes per framebuffer byte):
 - Hoist all static calculations (orientation rotation, strip target, physical row offset, write pointer) **once** per glyph row
 - Extract all 8 pixels from the bitmap into a single mask value
 - Do **1 RMW** per framebuffer byte (not per pixel)
@@ -40,7 +40,7 @@ template <GfxRenderer::Orientation orientation, TextRotation rotation,
 static void renderCharRow2Bit(const uint8_t* restrict fb,
                               const uint8_t* restrict bitmap,
                               int rowOffset, int byteStart, int byteEnd,
-                              uint32_t headMask, uint32_t tailMask,
+                              uint8_t headMask, uint8_t tailMask,
                               int glyphWidth, int pixelOffset);
 ```
 
@@ -85,32 +85,72 @@ switch (renderMode) {
 For each framebuffer byte in `[byteStart, byteEnd]`:
 
 ```cpp
-// Extract 4 pixels, pack dark/gray into 32-bit word
-uint32_t packed = 0;  // [dark nibble][light nibble]
-for (int p = 0; p < 4; p++) {
+// Extract 8 pixels from bitmap (2 bytes), build dark/light masks per bit position
+uint8_t darkMask = 0;   // bit set for black(val=3) or dark gray(val=2)
+uint8_t lightMask = 0;  // bit set for dark gray(val=2) or light gray(val=1)
+
+for (int p = 0; p < 8; p++) {          // 8 pixels per framebuffer byte
     if (pixelIdx < glyphWidth) {
         uint8_t byte = bitmap[pixelIdx >> 2];
         uint8_t val = (byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3;
-        uint8_t bmpVal = 3 - val;  // 0=black, 1=dark, 2=light, 3=white
+        // val: 0=white, 1=light gray, 2=dark gray, 3=black
 
-        if (bmpVal == 0 || bmpVal == 1) packed |= ((uint32_t)val << (p * 2));
-        if (bmpVal == 1 || bmpVal == 2) packed |= ((uint32_t)val << (p * 2 + 16));
+        uint8_t fbBit = 7 - p;         // MSB-first, aligns with FB
+        if (val >= 2) darkMask |= (1 << fbBit);           // black or dark gray
+        if (val >= 1 && val <= 2) lightMask |= (1 << fbBit);  // dark or light gray
 
         pixelIdx++;
     }
 }
 
-// Apply head mask (clear unused high nibbles)
-packed &= headMask;
-
-// Apply tail mask (clear unused low nibbles)
-packed &= tailMask;
-
-// Single RMW per plane
-fb[rowOffset] = (fb[rowOffset] & ~darkMask) | (packed >> 16 & darkMask);
-fb[grayRowOffset] = (fb[grayRowOffset] & ~lightMask) | (packed & lightMask);
+// Apply head/tail masks (per-bit, not per-nibble — see §6 below)
+darkMask &= headMask;
+darkMask &= tailMask;
+lightMask &= headMask;
+lightMask &= tailMask;
 ```
 
+**Grayscale is rendered in three separate passes**, not simultaneous dual-plane RMW.
+`GfxRenderer` has only one `frameBuffer`. Grayscale planes are created by copying the
+same buffer to different display RAM (`copyGrayscaleLsbBuffers` → BW RAM,
+`copyGrayscaleMsbBuffers` → RED RAM). Each render pass writes its own masks:
+
+- **BW**:   `(fb[rowOffset] & ~darkMask) | (drawMask & darkMask)` — black + dark gray + light gray
+- **LSB**:  `(fb[rowOffset] & ~lightMask) | (lsbMask & lightMask)` — dark gray only
+- **MSB**:  `(fb[rowOffset] & ~lightMask) | (msbMask & lightMask)` — dark gray + light gray
+
+For `BW`, the mask selects which pixels to set/clear according to `drawMask` (from the
+`black` parameter). For grayscale passes, `lsbMask`/`msbMask` are both `0xFF` (always
+set bit = ink) because a "gray" pixel always writes ink to its respective plane.
+
+### 3a. Grayscale Pass Architecture
+
+The rendering pipeline issues **three independent render passes** per glyph row:
+
+```cpp
+// Pass 1 — GRAYSCALE_LSB (BW RAM): dark gray only
+renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
+renderCharRow2Bit<orientation, rotation, GRAYSCALE_LSB>(...);  // writes lightMask
+
+// Pass 2 — GRAYSCALE_MSB (RED RAM): dark + light gray
+renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
+renderCharRow2Bit<orientation, rotation, GRAYSCALE_MSB>(...);  // writes lightMask
+
+// Pass 3 — BW (black text overgrays): black + dark gray + light gray
+renderer.setRenderMode(GfxRenderer::BW);
+renderCharRow2Bit<orientation, rotation, BW>(...);             // writes darkMask
+```
+
+This is fundamentally different from the single-pass dual-plane approach originally
+sketched. Each pass independently computes masks and does its own RMW on the shared
+`frameBuffer`. The display hardware then interprets the two RAM planes together:
+
+| BW RAM | RED RAM | Display color |
+|--------|---------|---------------|
+| 1      | 1       | white         |
+| 1      | 0       | light gray    |
+| 0      | 0       | dark gray     |
+| 0      | 1       | black         |
 ### 4. Main `renderCharImpl` — Static Calculations Upfront
 
 ```cpp
@@ -162,7 +202,7 @@ The compiler will eliminate dead branches (e.g., the `switch` for `orientation` 
 | Metric                         | Before | After                    | Improvement  |
 |--------------------------------|--------|--------------------------|--------------|
 | Function calls per 12×20 glyph | 240    | ~0                       | Eliminated   |
-| RMW operations per 12×20 glyph | 240    | ~30 (5 bytes × 2 planes) | **8× fewer** |
+| RMW operations per 12×20 glyph | 240    | ~90 (5 bytes × 3 passes) | **8× fewer** |
 | Orientation switch hits        | 240    | 0                        | Eliminated   |
 | Bounds check hits              | 240    | 0 (hoisted)              | Eliminated   |
 
@@ -184,40 +224,55 @@ The head and tail masks isolate only the bits that fall within the glyph's physi
 
 - When `byteStart == byteEnd` (glyph fits in one byte), combine: `(headMask & tailMask)`
 
-### Head/Tail Masks — 2-bit Mode
+### Head/Tail Masks — 2-bit Mode (Per-Bit)
 
-In 2-bit mode, each nibble (4 bits) holds 2 pixels, so masks operate on **nibble boundaries**:
-
-- **First valid nibble index**: `firstNibble = startX / 4`
-- **Last valid nibble index**: `lastNibble = endX / 4`
-
-```cpp
-// Head mask: clear all nibbles BEFORE firstNibble
-uint32_t headMask;
-if (startX == 0) headMask = 0x00000000;       // no nibbles to clear
-else             headMask = 0xF0F0F0F0 >> (4 * firstNibble);
-
-// Tail mask: clear all nibbles AFTER lastNibble
-uint32_t tailMask = (1U << (4 * (lastNibble + 1))) - 1;  // e.g., lastNibble=2 → 0x00000FFF
-```
-
-### Nibbles Alignment — 2-bit Mode
-
-The extraction packs pixels sequentially into nibbles 0-3 of the 32-bit word, but the framebuffer may require them at different nibble positions. A left-shift compensates:
+**Same approach as 1-bit mode.** The masks operate on individual bit positions within
+each framebuffer byte (8 pixels per byte), not nibble boundaries. This is because the
+fb layout is still **1-bit-per-pixel**; the 2-bit data from the font bitmap is decoded
+into separate `darkMask` and `lightMask` bytes where each bit corresponds to one pixel
+column.
 
 ```cpp
-// Shift amount = starting position within the byte, in nibbles
-int shiftAmount = (startX % 4) * 2;  // bits per pixel = 2
-packed <<= shiftAmount;
+// Head mask (first byte): clear bits to the left of glyph start
+uint8_t headMask = 0xFF >> (startX & 7);  // e.g., startX=5 → 0xE0 (bits 2-0 cleared)
+
+// Tail mask (last byte): clear bits to the right of glyph end
+uint8_t tailMask = 0xFF << (7 - (endX & 7));  // e.g., endX=10 → 0x03 (bits 7-3 cleared)
+
+// Mid bytes: no masking needed (all 8 bits are within glyph bounds)
+// Combined mask for first-and-last byte case:
+if (byteStart == byteEnd) {
+    headMask &= tailMask;
+    tailMask = 0;  // avoid double-applying
+}
 ```
+
+> **Note**: The original sketch used nibble-level masks (`uint32_t`, `0xF0F0F0F0` pattern)
+> which had multiple bugs (zero-head on startX==0, no intra-nibble bit positioning). That
+> approach was abandoned in favour of per-bit masks that match the 1-bit case exactly.
+> The pixel-to-mask alignment is handled during extraction by writing to `7 - p` rather
+> than using a post-hoc shift.
 
 ### Grayscale Mode Handling
 
-For `GRAY_MSB` and `GRAY_LSB`, dark gray and light gray pixels write to **different framebuffer planes**:
+Grayscale rendering uses **three separate render passes** over the same glyph row, each
+writing masks into the single `frameBuffer`:
 
-- Precompute `darkMask` (bits where pixel is black or dark gray) and `lightMask` (bits where pixel is white or light gray) per byte
-- Do 1 RMW on the BW plane for dark, 1 RMW on the grayscale plane for light
-- For `BW` mode, only the dark mask applies — white/light pixels are left untouched
+| Pass     | RenderMode       | What gets drawn                              | Mask used  | Write action                                  |
+|----------|------------------|----------------------------------------------|------------|-----------------------------------------------|
+| LSB      | GRAYSCALE_LSB    | Dark gray (val=2) only                       | lightMask  | `fb &= ~lightMask; fb |= lsbMask & lightMask` |
+| MSB      | GRAYSCALE_MSB    | Dark gray + light gray (val=1 or 2)          | lightMask  | `fb &= ~lightMask; fb |= msbMask & lightMask` |
+| BW       | BW               | Black + dark gray + light gray (val=0,1,2)   | darkMask   | `fb &= ~darkMask; fb |= drawMask & darkMask`  |
+
+- `lsbMask = 0xFF` in LSB pass — dark gray always writes ink to BW RAM
+- `msbMask = 0xFF` in MSB pass — dark+light gray always write ink to RED RAM
+- `drawMask` is derived from the `black` parameter in BW mode (set bit for black, clear for white)
+- White pixels (val=3) are never drawn — their bits stay at 1 (no ink)
+
+This three-pass approach matches the existing rendering pipeline: after all glyphs in a
+row are rendered, `copyGrayscaleLsbBuffers(frameBuffer)` and
+`copyGrayscaleMsbBuffers(frameBuffer)` copy the same framebuffer to the two display RAM
+planes. The hardware interprets the BW+RED combination as 4 gray levels (see §3a table).
 
 ### Strip Mode
 
@@ -238,12 +293,18 @@ Already handled transparently by `getWriteTarget()` and `getWriteOriginY()`:
 
 ## Implementation Steps
 
-1. **Create `renderCharRow1Bit`** template — byte-aligned 1-bit row processor with head/tail masks
-2. **Create `renderCharRow2Bit`** template — byte-aligned 2-bit row processor with nibble-level masks and shift compensation
+1. **Create `renderCharRow1Bit`** template — byte-aligned 1-bit row processor with head/tail masks (same as §2)
+2. **Create `renderCharRow2Bit`** template — byte-aligned 2-bit row processor that:
+   - Extracts 8 pixels per framebuffer byte (2 bitmap bytes), builds `darkMask` + `lightMask`
+   - Applies head/tail per-bit masks
+   - Performs a single RMW using the precomputed mask and the renderMode-specific write pattern
 3. **Refactor `renderCharImpl`** to:
-   - Hoist orientation rotation, strip target, physical coordinates upfront
-   - Compute per-row byte range and head/tail masks before the pixel loop
-   - Dispatch to the appropriate template function
+   - Hoist orientation rotation, strip target, physical coordinates upfront (unchanged)
+   - Compute per-row byte range and head/tail masks before the row loop (unchanged)
+   - For 2-bit fonts: call `renderCharRow2Bit` once (not three times) — the function internally
+     applies the mask pattern for the current `renderMode`, so one call handles all modes
+   - The **three-pass** architecture from §3a is handled outside this function: the caller
+     invokes `renderCharImpl` with GRAYSCALE_LSB, then GRAYSCALE_MSB, then BW
 4. **Verify correctness**: test all 24 orientation/rotation/mode combinations against existing output
 5. **Benchmark**: measure rendering time with profiling (the existing `start_ms` timing in `clearScreen`)
 
