@@ -110,7 +110,7 @@ lightMask &= headMask;
 lightMask &= tailMask;
 ```
 
-**Grayscale is rendered in three separate passes**, not simultaneous dual-plane RMW.
+**Grayscale is rendered in three separate passes** over the same glyph row.
 `GfxRenderer` has only one `frameBuffer`. Grayscale planes are created by copying the
 same buffer to different display RAM (`copyGrayscaleLsbBuffers` → BW RAM,
 `copyGrayscaleMsbBuffers` → RED RAM). Each render pass writes its own masks:
@@ -125,24 +125,29 @@ set bit = ink) because a "gray" pixel always writes ink to its respective plane.
 
 ### 3a. Grayscale Pass Architecture
 
-The rendering pipeline issues **three independent render passes** per glyph row:
+The rendering pipeline issues **three independent render passes** per glyph row.
+BW renders first (no clear), then each grayscale pass clears the framebuffer first
+(`clearScreen(0x00)`) and overwrites it. The BW content is saved before the sequence
+via `storeBwBuffer()` and restored after `displayGrayBuffer()` via `restoreBwBuffer()`,
+placing it on top of the grayscale planes for final display.
 
 ```cpp
-// Pass 1 — GRAYSCALE_LSB (BW RAM): dark gray only
-renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
-renderCharRow2Bit<orientation, rotation, GRAYSCALE_LSB>(...);  // writes lightMask
-
-// Pass 2 — GRAYSCALE_MSB (RED RAM): dark + light gray
-renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
-renderCharRow2Bit<orientation, rotation, GRAYSCALE_MSB>(...);  // writes lightMask
-
-// Pass 3 — BW (black text overgrays): black + dark gray + light gray
+// Pass 1 — BW (black text overgrays): black + dark gray + light gray
 renderer.setRenderMode(GfxRenderer::BW);
 renderCharRow2Bit<orientation, rotation, BW>(...);             // writes darkMask
+
+// Pass 2 — GRAYSCALE_LSB (BW RAM): dark gray only
+renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
+renderer.clearScreen(0x00);
+renderCharRow2Bit<orientation, rotation, GRAYSCALE_LSB>(...);  // writes lightMask
+
+// Pass 3 — GRAYSCALE_MSB (RED RAM): dark + light gray
+renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
+renderer.clearScreen(0x00);
+renderCharRow2Bit<orientation, rotation, GRAYSCALE_MSB>(...);  // writes lightMask
 ```
 
-This is fundamentally different from the single-pass dual-plane approach originally
-sketched. Each pass independently computes masks and does its own RMW on the shared
+Each pass independently computes masks and does its own RMW on the shared
 `frameBuffer`. The display hardware then interprets the two RAM planes together:
 
 | BW RAM | RED RAM | Display color |
@@ -197,12 +202,12 @@ The template `<orientation, rotation, renderMode>` produces **24 instantiations*
 
 The compiler will eliminate dead branches (e.g., the `switch` for `orientation` becomes a single arithmetic expression).
 
-## Expected Performance Improvement
+## Expected Performance Improvement per Render Pass
 
 | Metric                         | Before | After                    | Improvement  |
 |--------------------------------|--------|--------------------------|--------------|
 | Function calls per 12×20 glyph | 240    | ~0                       | Eliminated   |
-| RMW operations per 12×20 glyph | 240    | ~90 (5 bytes × 3 passes) | **8× fewer** |
+| RMW operations per 12×20 glyph | 240    | ~40 (2 bytes × 20 rows)  | **6× fewer** |
 | Orientation switch hits        | 240    | 0                        | Eliminated   |
 | Bounds check hits              | 240    | 0 (hoisted)              | Eliminated   |
 
@@ -247,12 +252,6 @@ if (byteStart == byteEnd) {
 }
 ```
 
-> **Note**: The original sketch used nibble-level masks (`uint32_t`, `0xF0F0F0F0` pattern)
-> which had multiple bugs (zero-head on startX==0, no intra-nibble bit positioning). That
-> approach was abandoned in favour of per-bit masks that match the 1-bit case exactly.
-> The pixel-to-mask alignment is handled during extraction by writing to `7 - p` rather
-> than using a post-hoc shift.
-
 ### Grayscale Mode Handling
 
 Grayscale rendering uses **three separate render passes** over the same glyph row, each
@@ -260,9 +259,9 @@ writing masks into the single `frameBuffer`:
 
 | Pass     | RenderMode       | What gets drawn                              | Mask used  | Write action                                  |
 |----------|------------------|----------------------------------------------|------------|-----------------------------------------------|
+| BW       | BW               | Black + dark gray + light gray (val=0,1,2)   | darkMask   | `fb &= ~darkMask; fb |= drawMask & darkMask`  |
 | LSB      | GRAYSCALE_LSB    | Dark gray (val=2) only                       | lightMask  | `fb &= ~lightMask; fb |= lsbMask & lightMask` |
 | MSB      | GRAYSCALE_MSB    | Dark gray + light gray (val=1 or 2)          | lightMask  | `fb &= ~lightMask; fb |= msbMask & lightMask` |
-| BW       | BW               | Black + dark gray + light gray (val=0,1,2)   | darkMask   | `fb &= ~darkMask; fb |= drawMask & darkMask`  |
 
 - `lsbMask = 0xFF` in LSB pass — dark gray always writes ink to BW RAM
 - `msbMask = 0xFF` in MSB pass — dark+light gray always write ink to RED RAM
@@ -285,6 +284,12 @@ Already handled transparently by `getWriteTarget()` and `getWriteOriginY()`:
 
 24 template instantiations × ~80 bytes each ≈ **~2 KB** of code size. This is acceptable against the ESP32-C3's 16 MB flash.
 
+### renderCharScaled — Deferred to v2
+
+`renderCharScaled` (in `GfxRenderer.cpp`, used for SUP/SUB text) still uses pixel-by-pixel
+rendering with `drawPixel()` calls. It is called far less frequently than `renderCharImpl` and
+is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
+
 ### Memory Safety (ESP32-C3 RISC-V)
 
 - No heap allocation in the hot path — all buffers are on the stack or point to existing framebuffer
@@ -301,10 +306,16 @@ Already handled transparently by `getWriteTarget()` and `getWriteOriginY()`:
 3. **Refactor `renderCharImpl`** to:
    - Hoist orientation rotation, strip target, physical coordinates upfront (unchanged)
    - Compute per-row byte range and head/tail masks before the row loop (unchanged)
-   - For 2-bit fonts: call `renderCharRow2Bit` once (not three times) — the function internally
+   - For 2-bit fonts: call `renderCharRow2Bit` once — the function internally
      applies the mask pattern for the current `renderMode`, so one call handles all modes
    - The **three-pass** architecture from §3a is handled outside this function: the caller
-     invokes `renderCharImpl` with GRAYSCALE_LSB, then GRAYSCALE_MSB, then BW
+     invokes `renderCharImpl` with BW, then GRAYSCALE_LSB (after clearScreen), then GRAYSCALE_MSB
+     (after clearScreen)
+   - **Store/Restore**: before the three-pass sequence, the caller must call
+     `renderer.storeBwBuffer()` to save the BW framebuffer. After `displayGrayBuffer()`
+     and `restoreBwBuffer()`, the BW content is restored on top of the grayscale planes.
+     1-bit fonts (no grayscale) skip this entirely — they render directly to the
+     framebuffer in a single pass.
 4. **Verify correctness**: test all 24 orientation/rotation/mode combinations against existing output
 5. **Benchmark**: measure rendering time with profiling (the existing `start_ms` timing in `clearScreen`)
 
