@@ -172,9 +172,12 @@ The display hardware then interprets the two RAM planes together:
 | 0      | 1       | black         |
 ### 4. Main `renderCharImpl` — Static Calculations Upfront
 
+`renderMode` is a template parameter (not a runtime member variable), so the compiler
+can eliminate dead branches. The caller invokes three separate instantiations:
+
 ```cpp
-template <TextRotation rotation>
-static void renderCharImpl(...) {
+template <TextRotation rotation, GfxRenderer::RenderMode renderMode>
+static void renderCharImpl(const GfxRenderer& renderer, ...) {
     // --- Glyph lookup (unchanged) ---
     const EpdGlyph* glyph = fontFamily.getGlyph(cp, style);
     const EpdFontData* fontData = fontFamily.getData(style);
@@ -185,7 +188,6 @@ static void renderCharImpl(...) {
     int byteStart, byteEnd;      // framebuffer byte range
 
     // --- Hoisted: strip target selection ---
-    const auto& renderer = ...;
     uint8_t* fb = renderer.getWriteTarget();
     int rowOffsetBase = renderer.getWriteOriginY();
     int writeRows = renderer.getWriteRows();
@@ -202,7 +204,7 @@ static void renderCharImpl(...) {
         computeByteRangeAndMasks(..., &byteStart, &byteEnd, &headMask, &tailMask);
 
         // Dispatch to byte-aligned row processor
-        if (is2Bit)
+        if (fontData->is2Bit)
             renderCharRow2Bit<orientation, rotation, renderMode>(...);
         else
             renderCharRow1Bit<orientation, rotation, renderMode>(...);
@@ -210,11 +212,24 @@ static void renderCharImpl(...) {
 }
 ```
 
+**Caller invocation** (from `drawText`):
+```cpp
+// BW pass
+renderCharImpl<TextRotation::None, GfxRenderer::BW>(renderer, ...);
+
+// Grayscale passes (each preceded by clearScreen(0x00))
+renderCharImpl<TextRotation::None, GfxRenderer::GRAYSCALE_LSB>(renderer, ...);
+renderCharImpl<TextRotation::None, GfxRenderer::GRAYSCALE_MSB>(renderer, ...);
+```
+
+For 1-bit fonts the grayscale instantiations are never called, so the compiler won't emit
+them — only 16 instantiations (4 orientations × 2 rotations × 2 active modes) are produced.
+
 ### 5. Compile-Time Orientation Specialization
 
-The template `<orientation, rotation, renderMode>` produces **24 instantiations** (4 orientations × 2 rotations × 3 render modes). Each has the coordinate math fully inlined — no runtime switch in the pixel loop.
+The template `<orientation, rotation, renderMode>` produces up to **24 instantiations** (4 orientations × 2 rotations × 3 render modes). Each has the coordinate math fully inlined — no runtime switch in the pixel loop.
 
-The compiler will eliminate dead branches (e.g., the `switch` for `orientation` becomes a single arithmetic expression).
+The compiler will eliminate dead branches (e.g., the `switch` for `orientation` becomes a single arithmetic expression). For 1-bit fonts the GRAYSCALE_LSB and GRAYSCALE_MSB instantiations are never called, so only 16 are emitted.
 
 ## Expected Performance Improvement per Render Pass
 
@@ -324,14 +339,15 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
    - Applies head/tail per-bit masks
    - Performs a single RMW: `fb &= ~mask` for BW, `fb |= mask` for grayscale passes
 3. **Refactor `renderCharImpl`** to:
+   - Add `renderMode` as a template parameter (not a runtime member variable)
    - Hoist orientation rotation, strip target, physical coordinates upfront (unchanged)
    - Compute per-row byte range and head/tail masks before the row loop (unchanged)
    - For 2-bit fonts: call `renderCharRow2Bit` once per render pass. The `renderMode`
      template parameter is a compile-time constant — `constexpr-if` selects the mask
      condition and FB write operation, so the compiler eliminates dead branches.
    - The **three-pass** architecture from §3a is handled outside this function: the caller
-     invokes `renderCharImpl` with BW, then GRAYSCALE_LSB (after clearScreen), then GRAYSCALE_MSB
-     (after clearScreen)
+     invokes `renderCharImpl<..., BW>`, then `renderCharImpl<..., GRAYSCALE_LSB>` (after
+     clearScreen), then `renderCharImpl<..., GRAYSCALE_MSB>` (after clearScreen)
    - **Store/Restore**: before the three-pass sequence, the caller must call
      `renderer.storeBwBuffer()` to save the BW framebuffer. After `displayGrayBuffer()`
      and `restoreBwBuffer()`, the BW content is restored on top of the grayscale planes.
