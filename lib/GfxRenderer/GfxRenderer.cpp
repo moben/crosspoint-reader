@@ -644,7 +644,7 @@ void GfxRenderer::drawCenteredText(const int fontId, const int y, const char* te
 // template instantiation. orientation and renderMode are runtime values on GfxRenderer
 // but constant for the duration of a single drawText call, so the switch executes once
 // per character (not per pixel).
-static inline void dispatchRenderCharImpl(const GfxRenderer& renderer, TextRotation rotation,
+__attribute__((always_inline)) static inline void dispatchRenderCharImpl(const GfxRenderer& renderer, TextRotation rotation,
                                           const EpdFontFamily& fontFamily, uint32_t cp,
                                           int cursorX, int cursorY, bool black,
                                           EpdFontFamily::Style style) {
@@ -716,7 +716,7 @@ static inline void dispatchRenderCharImpl(const GfxRenderer& renderer, TextRotat
   }
 }
 
-static inline void dispatchRenderCharImplRotated(const GfxRenderer& renderer,
+__attribute__((always_inline)) static inline void dispatchRenderCharImplRotated(const GfxRenderer& renderer,
                                                  const EpdFontFamily& fontFamily, uint32_t cp,
                                                  int cursorX, int cursorY, bool black,
                                                  EpdFontFamily::Style style) {
