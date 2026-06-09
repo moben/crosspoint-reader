@@ -102,7 +102,7 @@ void GfxRenderer::insertFont(const int fontId, EpdFontFamily font) {
 
 // Translate logical (x,y) coordinates to physical panel coordinates based on current orientation
 // This should always be inlined for better performance
-static inline void rotateCoordinates(const GfxRenderer::Orientation orientation, const int x, const int y, int* phyX,
+__attribute__((always_inline)) static inline void rotateCoordinates(const GfxRenderer::Orientation orientation, const int x, const int y, int* phyX,
                                      int* phyY, const uint16_t panelWidth, const uint16_t panelHeight) {
   switch (orientation) {
     case GfxRenderer::Portrait: {
@@ -146,7 +146,7 @@ enum class TextRotation { None, Rotated90CW };
 // ---------------------------------------------------------------------------
 template <GfxRenderer::Orientation orientation, TextRotation rotation,
           GfxRenderer::RenderMode renderMode>
-static void renderCharRow1Bit(uint8_t* const fb,
+__attribute__((always_inline)) static inline void renderCharRow1Bit(uint8_t* const fb,
                               const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
@@ -184,7 +184,7 @@ static void renderCharRow1Bit(uint8_t* const fb,
 // ---------------------------------------------------------------------------
 template <GfxRenderer::Orientation orientation, TextRotation rotation,
           GfxRenderer::RenderMode renderMode>
-static void renderCharRow2Bit(uint8_t* const fb,
+__attribute__((always_inline)) static inline void renderCharRow2Bit(uint8_t* const fb,
                               const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
