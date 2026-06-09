@@ -451,12 +451,7 @@ the template parameters are accepted but currently unused in the helper bodies
 params will be threaded through properly, enabling full compile-time DCE of
 dead branches within the helpers as well.
 
-**P1 — Remove unused `renderChar` method**
-
-The header declares `void renderChar(...)` (line ~84) but this method is not
-called anywhere in the codebase. Verify it is dead code and remove it.
-
-**P2 — `renderCharScaled` still pixel-by-pixel (deferred, in scope)**
+**P1 — `renderCharScaled` still pixel-by-pixel (deferred, in scope)**
 
 `renderCharScaled()` (used for SUP/SUB text) still uses per-pixel `drawPixel()`
 calls. This is a known deferred optimization — it's called far less frequently
