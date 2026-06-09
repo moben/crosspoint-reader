@@ -404,33 +404,69 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
 
 ## Implementation Steps
 
-1. **Create `renderCharRow1Bit`** template — byte-aligned 1-bit row processor with head/tail masks (§2).
+### Completed ✅
+
+1. ✅ **Create `renderCharRow1Bit`** template — byte-aligned 1-bit row processor with head/tail masks (§2).
    Template params: `<orientation, rotation, renderMode>`.
+   **Status**: Defined at `GfxRenderer.cpp:~79-108`. **NOT YET USED** — see cleanup below.
 
-2. **Create `renderCharRow2Bit`** template — byte-aligned 2-bit row processor (§3):
-   - Extracts 8 pixels per framebuffer byte (2 bitmap bytes), builds a single `mask`
-   - Uses `constexpr-if` on `renderMode` to select the mask condition:
-     `val < 3` for BW, `val == 2` for GRAYSCALE_LSB, `val == 1 \|\| val == 2` for GRAYSCALE_MSB
-   - Applies head/tail per-bit masks
-   - Performs a single RMW: `fb &= ~mask` for BW, `fb |= mask` for grayscale passes
-   - Template params: `<orientation, rotation, renderMode>`
+2. ✅ **Create `renderCharRow2Bit`** template — byte-aligned 2-bit row processor (§3).
+   Uses `constexpr-if` on `renderMode`, applies head/tail masks, performs single RMW.
+   **Status**: Defined at `GfxRenderer.cpp:~115-162`. **NOT YET USED** — see cleanup below.
 
-3. **Refactor `renderCharImpl`** to:
-   - Add `orientation` and `renderMode` as template parameters:
-     `<orientation, rotation, renderMode>`
-   - Hoist orientation rotation, strip target, physical coordinates upfront
-   - Compute per-row byte range and head/tail masks before the row loop
-   - Dispatch to `renderCharRow1Bit` or `renderCharRow2Bit` with the same template params
-   - The **three-pass** architecture stays at the activity level (caller invokes
-     `page->render()` three times with different `renderMode` settings)
+3. ✅ **`renderCharImpl` refactored** — now a template `<orientation, rotation, renderMode>`
+   with byte-aligned row processing. Orientation rotation, strip target, and physical
+   coordinates are hoisted upfront. Per-row byte range and head/tail masks are computed
+   before the row loop.
+   **Status**: Defined at `GfxRenderer.cpp:~170-500`. **INLINED** — the row processing
+   loops are duplicated inline rather than dispatching to `renderCharRow1Bit`/`renderCharRow2Bit`.
 
-4. **Add runtime dispatch wrapper** in `drawText` and `drawTextRotated90CW`:
-   - Replace the direct `renderCharImpl<TextRotation::None>(...)` call with a nested
-     `switch (orientation) { case ...: switch (renderMode) { case ...: renderCharImpl<...>(...) } }`
-   - 12 dispatch cases per function, 24 total
+4. ✅ **Runtime dispatch wrappers** — `dispatchRenderCharImpl()` and
+   `dispatchRenderCharImplRotated()` implement the nested `switch` over orientation
+   and renderMode (24 total cases, 12 per function).
+   **Status**: Both defined and actively used by `drawText()` and
+   `drawTextRotated90CW()`.
 
-5. **Verify correctness**: test all 24 orientation/rotation/mode combinations against existing output
-6. **Benchmark**: measure rendering time with profiling (the existing `start_ms` timing in `clearScreen`)
+5. ⏳ **Verify correctness** — pending device testing on all 24 orientation/rotation/mode
+   combinations.
+
+6. ⏳ **Benchmark** — pending profiling with the existing `start_ms` timing in `clearScreen`.
+
+### Outstanding Cleanup ❌
+
+**P0 — Eliminate code duplication by wiring `renderCharImpl` to the helpers**
+
+`renderCharRow1Bit` and `renderCharRow2Bit` are defined but **never called**.
+Inside `renderCharImpl`, the same row-processing logic is duplicated inline
+(2-bit path at `GfxRenderer.cpp:~220-290`, 1-bit path at `~340-400`).
+
+**Fix**: Replace the inline row loops in `renderCharImpl` with calls to
+`renderCharRow1Bit<orientation, rotation, renderMode>(...)` and
+`renderCharRow2Bit<orientation, rotation, renderMode>(...)`. This matches
+the original plan and eliminates ~120 lines of duplicated code.
+
+The helper signatures already accept `<orientation, rotation, renderMode>` —
+the template parameters are accepted but currently unused in the helper bodies
+(because the helpers are dead code). Once wired up, the orientation and rotation
+params will be threaded through properly, enabling full compile-time DCE of
+dead branches within the helpers as well.
+
+**P1 — Remove unused `renderChar` method**
+
+The header declares `void renderChar(...)` (line ~84) but this method is not
+called anywhere in the codebase. Verify it is dead code and remove it.
+
+**P2 — `renderCharScaled` still pixel-by-pixel (deferred, in scope)**
+
+`renderCharScaled()` (used for SUP/SUB text) still uses per-pixel `drawPixel()`
+calls. This is a known deferred optimization — it's called far less frequently
+than `renderCharImpl`. Out of scope for this PR.
+
+### Pending Verification
+
+5. **Verify correctness** — test all 24 orientation/rotation/mode combinations
+   against existing output on device.
+6. **Benchmark** — measure rendering time improvement with profiling.
 
 ## Files to Modify
 
