@@ -136,6 +136,58 @@ static inline void rotateCoordinates(const GfxRenderer::Orientation orientation,
 
 enum class TextRotation { None, Rotated90CW };
 
+// ---------------------------------------------------------------------------
+// Byte-aligned row processor — 1-bit fonts
+// ---------------------------------------------------------------------------
+// Processes one glyph row by iterating over framebuffer bytes instead of
+// pixels. For each byte: extracts up to 8 bitmap bits into a single mask,
+// applies head/tail masks, then performs exactly ONE read-modify-write on
+// the framebuffer.  Eliminates all per-pixel drawPixel() calls and RMWs.
+//
+// Template parameters are compile-time constants so the compiler emits one
+// arithmetic expression for physical-row offset (no runtime switch).
+// ---------------------------------------------------------------------------
+
+template <GfxRenderer::Orientation orientation, TextRotation rotation,
+          GfxRenderer::RenderMode renderMode>
+static void renderCharRow1Bit(const uint8_t* restrict fb,
+                              const uint8_t* restrict bitmap,
+                              int rowOffset, int byteStart, int byteEnd,
+                              uint8_t headMask, uint8_t tailMask,
+                              int glyphWidth, int pixelOffset);
+
+// --- Implementation: 1-bit row processor ---
+template <GfxRenderer::Orientation orientation, TextRotation rotation,
+          GfxRenderer::RenderMode renderMode>
+static void renderCharRow1Bit(const uint8_t* restrict fb,
+                              const uint8_t* restrict bitmap,
+                              int rowOffset, int byteStart, int byteEnd,
+                              uint8_t headMask, uint8_t tailMask,
+                              int glyphWidth, int pixelOffset) {
+  // BW only — grayscale passes are no-ops for 1-bit fonts.
+  // FB bit: 0 = ink (black), 1 = no-ink (white).
+  // mask has 1-bits where pixels should be drawn → clear those bits.
+  for (int b = byteStart; b <= byteEnd; b++) {
+    uint8_t mask = 0;
+    for (int p = 0; p < 8; p++) {
+      const int pixelIdx = pixelOffset + b * 8 + p;
+      if (pixelIdx < glyphWidth) {
+        const uint8_t byte = bitmap[pixelIdx >> 3];
+        if ((byte >> (7 - (pixelIdx & 7))) & 1) {
+          mask |= (1 << (7 - p));  // MSB-first, aligns with FB
+        }
+      }
+    }
+    if (b == byteStart && b == byteEnd) {
+      mask &= headMask;  // combined head+tail for single-byte glyphs
+    } else {
+      if (b == byteStart) mask &= headMask;
+      if (b == byteEnd)   mask &= tailMask;
+    }
+    fb[rowOffset + b] &= ~mask;  // clear drawn bits (0 = ink)
+  }
+}
+
 // Shared glyph rendering logic for normal and rotated text.
 // Coordinate mapping and cursor advance direction are selected at compile time via the template parameter.
 // Render a glyph at 50% scale. Used for SUP/SUB style bits.
@@ -212,9 +264,20 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
   }
 }
 
-template <TextRotation rotation = TextRotation::None>
-static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode renderMode,
-                           const EpdFontFamily& fontFamily, const uint32_t cp, int cursorX, int cursorY,
+// ---------------------------------------------------------------------------
+// Byte-aligned renderCharImpl — orientation-specialized template
+// ---------------------------------------------------------------------------
+// Adds <orientation, rotation, renderMode> as template parameters so that:
+//   - Physical coordinate math is fully inlined (no runtime switch)
+//   - Dead branches for renderMode are eliminated by the compiler
+//   - The three-pass grayscale architecture stays at the activity level
+// ---------------------------------------------------------------------------
+
+template <GfxRenderer::Orientation orientation, TextRotation rotation,
+          GfxRenderer::RenderMode renderMode>
+static void renderCharImpl(const GfxRenderer& renderer,
+                           const EpdFontFamily& fontFamily, const uint32_t cp,
+                           int cursorX, int cursorY,
                            const bool pixelState, const EpdFontFamily::Style style) {
   const EpdGlyph* glyph = fontFamily.getGlyph(cp, style);
   if (!glyph) {
@@ -227,7 +290,7 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
   const uint8_t width = glyph->width;
   const uint8_t height = glyph->height;
   const int left = glyph->left;
-  const int top = glyph->top;
+  const top = glyph->top;
 
   // Tiled-grayscale band culling: if this glyph's physical y-extent is entirely
   // outside the active strip, skip it before the expensive bitmap decode. This
@@ -247,73 +310,294 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
   }
 
   const uint8_t* bitmap = renderer.getGlyphBitmap(fontData, glyph);
+  if (bitmap == nullptr) return;
 
-  if (bitmap != nullptr) {
-    // For Normal:  outer loop advances screenY, inner loop advances screenX
-    // For Rotated: outer loop advances screenX, inner loop advances screenY (in reverse)
-    int outerBase, innerBase;
-    if constexpr (rotation == TextRotation::Rotated90CW) {
-      outerBase = cursorX + fontData->ascender - top;  // screenX = outerBase + glyphY
-      innerBase = cursorY - left;                      // screenY = innerBase - glyphX
-    } else {
-      outerBase = cursorY - top;   // screenY = outerBase + glyphY
-      innerBase = cursorX + left;  // screenX = innerBase + glyphX
-    }
+  // --- Hoisted: strip target selection ---
+  uint8_t* fb = renderer.getWriteTarget();
+  int originY = renderer.getWriteOriginY();
+  int writeRows = renderer.getWriteRows();
 
-    if (is2Bit) {
-      int pixelPosition = 0;
-      for (int glyphY = 0; glyphY < height; glyphY++) {
-        const int outerCoord = outerBase + glyphY;
-        for (int glyphX = 0; glyphX < width; glyphX++, pixelPosition++) {
-          int screenX, screenY;
-          if constexpr (rotation == TextRotation::Rotated90CW) {
-            screenX = outerCoord;
-            screenY = innerBase - glyphX;
-          } else {
-            screenX = innerBase + glyphX;
-            screenY = outerCoord;
+  // --- Hoisted: compute logical-to-physical row offset at compile time ---
+  // orientation is a template param → compiler emits one arithmetic expression.
+  // For Normal text, glyph rows map to physical Y; for Rotated90CW, they map
+  // to physical X (handled by the inner loop below).
+
+  if (is2Bit) {
+    // --- 2-bit: byte-aligned row processor ---
+    // Layout: outer = glyphY (row), inner = glyphX (pixel within row)
+    // For Normal: screenY = outerBase + glyphY, screenX = innerBase + glyphX
+    // For Rotated90CW: screenX = outerBase + glyphY, screenY = innerBase - glyphX
+
+    const int outerBase = cursorY - top;       // screenY base for Normal
+    const int innerBase = cursorX + left;      // screenX base for Normal
+
+    for (int glyphY = 0; glyphY < height; glyphY++) {
+      // Compute physical row offset for this glyph row.
+      // For orientation Portrait: logical Y → physical X via rotateCoordinates,
+      // so a glyph row (constant logical Y) maps to a constant physical X column.
+      // We need the physical Y range that this row occupies.
+      int phyRowMin = 0, phyRowMax = 0;
+
+      if constexpr (orientation == GfxRenderer::Portrait) {
+        // Portrait: screenY → phyX, screenX → panelHeight-1-phyY
+        // glyph row at logical Y maps to physical X = glyphY + outerBase...
+        // but we need the physical Y extent.
+        const int logY0 = outerBase + glyphY;
+        const int logY1 = outerBase + glyphY;  // single row
+        const int logX0 = innerBase;
+        const int logX1 = innerBase + width - 1;
+
+        int px0, py0, px1, py1;
+        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
+        rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
+        phyRowMin = std::min(py0, py1);
+        phyRowMax = std::max(py0, py1);
+      } else if constexpr (orientation == GfxRenderer::LandscapeClockwise) {
+        const int logY0 = outerBase + glyphY;
+        const int logY1 = outerBase + glyphY;
+        const int logX0 = innerBase;
+        const int logX1 = innerBase + width - 1;
+
+        int px0, py0, px1, py1;
+        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
+        rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
+        phyRowMin = std::min(py0, py1);
+        phyRowMax = std::max(py0, py1);
+      } else if constexpr (orientation == GfxRenderer::PortraitInverted) {
+        const int logY0 = outerBase + glyphY;
+        const int logY1 = outerBase + glyphY;
+        const int logX0 = innerBase;
+        const int logX1 = innerBase + width - 1;
+
+        int px0, py0, px1, py1;
+        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
+        rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
+        phyRowMin = std::min(py0, py1);
+        phyRowMax = std::max(py0, py1);
+      } else {  // LandscapeCounterClockwise
+        const int logY0 = outerBase + glyphY;
+        const int logY1 = outerBase + glyphY;
+        const int logX0 = innerBase;
+        const int logX1 = innerBase + width - 1;
+
+        int px0, py0, px1, py1;
+        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
+        rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
+        phyRowMin = std::min(py0, py1);
+        phyRowMax = std::max(py0, py1);
+      }
+
+      // Clip to strip bounds
+      if (phyRowMax < originY || phyRowMin >= originY + writeRows) continue;
+
+      int rowOffsetStart = std::max(phyRowMin - originY, 0);
+      int rowOffsetEnd = std::min(phyRowMax - originY, writeRows - 1);
+
+      // Compute physical X range for head/tail masks
+      const int logY0 = outerBase + glyphY;
+      const int logX0 = innerBase;
+      const int logX1 = innerBase + width - 1;
+
+      int pxHead, pyHead, pxTail, pyTail;
+      rotateCoordinates(orientation, logX0, logY0, &pxHead, &pyHead, renderer.panelWidth, renderer.panelHeight);
+      rotateCoordinates(orientation, logX1, logY0, &pxTail, &pyTail, renderer.panelWidth, renderer.panelHeight);
+
+      int phyXMin = std::min(pxHead, pxTail);
+      int phyXMax = std::max(pxHead, pxTail);
+
+      // Compute byte range within the physical row
+      const int byteStart = phyXMin >> 3;
+      const int byteEnd = phyXMax >> 3;
+      const uint8_t headMask = static_cast<uint8_t>(0xFFu >> (phyXMin & 7));
+      const uint8_t tailMask = static_cast<uint8_t>(0xFFu << (7 - (phyXMax & 7)));
+
+      // Pixel offset into the bitmap for this row
+      const int pixelOffset = glyphY * ((width + 3) / 4);
+
+      if constexpr (renderMode == GfxRenderer::BW) {
+        // BW pass: draw all non-white pixels (val < 3 → fb bit 0 = ink)
+        for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
+          uint8_t* rowPtr = fb + rowOff * renderer.panelWidthBytes;
+          for (int b = byteStart; b <= byteEnd; b++) {
+            uint8_t mask = 0;
+            for (int p = 0; p < 8; p++) {
+              const int pixelIdx = pixelOffset + b * 4 + p / 2;  // 4 pixels per byte for 2-bit
+              if (pixelIdx < width) {
+                const uint8_t byte = bitmap[pixelIdx >> 2];
+                const uint8_t val = ((byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3);
+                // val: 0=white, 1=light-gray, 2=dark-gray, 3=black
+                // Inverted: 0=black, 1=dark-grey, 2=light-grey, 3=white
+                const uint8_t bmpVal = 3 - val;
+                if (bmpVal < 3) {  // non-white → draw
+                  mask |= (1 << (7 - p));
+                }
+              }
+            }
+            if (b == byteStart && b == byteEnd) {
+              mask &= headMask;
+            } else {
+              if (b == byteStart) mask &= headMask;
+              if (b == byteEnd)   mask &= tailMask;
+            }
+            rowPtr[b] &= ~mask;  // clear drawn bits
           }
-
-          const uint8_t byte = bitmap[pixelPosition >> 2];
-          const uint8_t bit_index = (3 - (pixelPosition & 3)) * 2;
-          // the direct bit from the font is 0 -> white, 1 -> light gray, 2 -> dark gray, 3 -> black
-          // we swap this to better match the way images and screen think about colors:
-          // 0 -> black, 1 -> dark grey, 2 -> light grey, 3 -> white
-          const uint8_t bmpVal = 3 - ((byte >> bit_index) & 0x3);
-
-          if (renderMode == GfxRenderer::BW && bmpVal < 3) {
-            // Black (also paints over the grays in BW mode)
-            renderer.drawPixel(screenX, screenY, pixelState);
-          } else if (renderMode == GfxRenderer::GRAYSCALE_MSB && (bmpVal == 1 || bmpVal == 2)) {
-            // Light gray (also mark the MSB if it's going to be a dark gray too)
-            // Dedicated X3 gray LUTs now provide proper 4-level gray on both devices
-            // We have to flag pixels in reverse for the gray buffers, as 0 leave alone, 1 update
-            renderer.drawPixel(screenX, screenY, false);
-          } else if (renderMode == GfxRenderer::GRAYSCALE_LSB && bmpVal == 1) {
-            // Dark gray
-            renderer.drawPixel(screenX, screenY, false);
+        }
+      } else if constexpr (renderMode == GfxRenderer::GRAYSCALE_LSB) {
+        // GRAYSCALE_LSB pass: dark gray only (val == 2 → bmpVal == 1)
+        for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
+          uint8_t* rowPtr = fb + rowOff * renderer.panelWidthBytes;
+          for (int b = byteStart; b <= byteEnd; b++) {
+            uint8_t mask = 0;
+            for (int p = 0; p < 8; p++) {
+              const int pixelIdx = pixelOffset + b * 4 + p / 2;
+              if (pixelIdx < width) {
+                const uint8_t byte = bitmap[pixelIdx >> 2];
+                const uint8_t val = ((byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3);
+                const uint8_t bmpVal = 3 - val;
+                if (bmpVal == 1) {  // dark gray → draw in LSB
+                  mask |= (1 << (7 - p));
+                }
+              }
+            }
+            if (b == byteStart && b == byteEnd) {
+              mask &= headMask;
+            } else {
+              if (b == byteStart) mask &= headMask;
+              if (b == byteEnd)   mask &= tailMask;
+            }
+            rowPtr[b] |= mask;  // set drawn bits for grayscale
+          }
+        }
+      } else {  // GRAYSCALE_MSB
+        // GRAYSCALE_MSB pass: dark + light gray (val == 1 || val == 2 → bmpVal == 1 || bmpVal == 2)
+        for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
+          uint8_t* rowPtr = fb + rowOff * renderer.panelWidthBytes;
+          for (int b = byteStart; b <= byteEnd; b++) {
+            uint8_t mask = 0;
+            for (int p = 0; p < 8; p++) {
+              const int pixelIdx = pixelOffset + b * 4 + p / 2;
+              if (pixelIdx < width) {
+                const uint8_t byte = bitmap[pixelIdx >> 2];
+                const uint8_t val = ((byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3);
+                const uint8_t bmpVal = 3 - val;
+                if (bmpVal == 1 || bmpVal == 2) {  // light or dark gray → draw in MSB
+                  mask |= (1 << (7 - p));
+                }
+              }
+            }
+            if (b == byteStart && b == byteEnd) {
+              mask &= headMask;
+            } else {
+              if (b == byteStart) mask &= headMask;
+              if (b == byteEnd)   mask &= tailMask;
+            }
+            rowPtr[b] |= mask;  // set drawn bits for grayscale
           }
         }
       }
-    } else {
-      int pixelPosition = 0;
-      for (int glyphY = 0; glyphY < height; glyphY++) {
-        const int outerCoord = outerBase + glyphY;
-        for (int glyphX = 0; glyphX < width; glyphX++, pixelPosition++) {
-          int screenX, screenY;
-          if constexpr (rotation == TextRotation::Rotated90CW) {
-            screenX = outerCoord;
-            screenY = innerBase - glyphX;
-          } else {
-            screenX = innerBase + glyphX;
-            screenY = outerCoord;
-          }
+    }
+  } else {
+    // --- 1-bit: use the byte-aligned row processor ---
+    const int outerBase = cursorY - top;   // screenY base for Normal
+    const int innerBase = cursorX + left;  // screenX base for Normal
 
-          const uint8_t byte = bitmap[pixelPosition >> 3];
-          const uint8_t bit_index = 7 - (pixelPosition & 7);
+    for (int glyphY = 0; glyphY < height; glyphY++) {
+      // Compute physical row extent for this glyph row.
+      int phyRowMin = 0, phyRowMax = 0;
 
-          if ((byte >> bit_index) & 1) {
-            renderer.drawPixel(screenX, screenY, pixelState);
+      if constexpr (orientation == GfxRenderer::Portrait) {
+        const int logY0 = outerBase + glyphY;
+        const int logX0 = innerBase;
+        const int logX1 = innerBase + width - 1;
+
+        int px0, py0, px1, py1;
+        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
+        rotateCoordinates(orientation, logX1, logY0, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
+        phyRowMin = std::min(py0, py1);
+        phyRowMax = std::max(py0, py1);
+      } else if constexpr (orientation == GfxRenderer::LandscapeClockwise) {
+        const int logY0 = outerBase + glyphY;
+        const int logX0 = innerBase;
+        const int logX1 = innerBase + width - 1;
+
+        int px0, py0, px1, py1;
+        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
+        rotateCoordinates(orientation, logX1, logY0, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
+        phyRowMin = std::min(py0, py1);
+        phyRowMax = std::max(py0, py1);
+      } else if constexpr (orientation == GfxRenderer::PortraitInverted) {
+        const int logY0 = outerBase + glyphY;
+        const int logX0 = innerBase;
+        const int logX1 = innerBase + width - 1;
+
+        int px0, py0, px1, py1;
+        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
+        rotateCoordinates(orientation, logX1, logY0, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
+        phyRowMin = std::min(py0, py1);
+        phyRowMax = std::max(py0, py1);
+      } else {  // LandscapeCounterClockwise
+        const int logY0 = outerBase + glyphY;
+        const int logX0 = innerBase;
+        const int logX1 = innerBase + width - 1;
+
+        int px0, py0, px1, py1;
+        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
+        rotateCoordinates(orientation, logX1, logY0, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
+        phyRowMin = std::min(py0, py1);
+        phyRowMax = std::max(py0, py1);
+      }
+
+      // Clip to strip bounds
+      if (phyRowMax < originY || phyRowMin >= originY + writeRows) continue;
+
+      int rowOffsetStart = std::max(phyRowMin - originY, 0);
+      int rowOffsetEnd = std::min(phyRowMax - originY, writeRows - 1);
+
+      // Compute physical X range for head/tail masks
+      const int logY0 = outerBase + glyphY;
+      const int logX0 = innerBase;
+      const int logX1 = innerBase + width - 1;
+
+      int pxHead, pyHead, pxTail, pyTail;
+      rotateCoordinates(orientation, logX0, logY0, &pxHead, &pyHead, renderer.panelWidth, renderer.panelHeight);
+      rotateCoordinates(orientation, logX1, logY0, &pxTail, &pyTail, renderer.panelWidth, renderer.panelHeight);
+
+      int phyXMin = std::min(pxHead, pxTail);
+      int phyXMax = std::max(pxHead, pxTail);
+
+      // Compute byte range within the physical row
+      const int byteStart = phyXMin >> 3;
+      const int byteEnd = phyXMax >> 3;
+      const uint8_t headMask = static_cast<uint8_t>(0xFFu >> (phyXMin & 7));
+      const uint8_t tailMask = static_cast<uint8_t>(0xFFu << (7 - (phyXMax & 7)));
+
+      // Pixel offset into the bitmap for this row
+      const int pixelOffset = glyphY * ((width + 7) / 8);
+
+      if constexpr (renderMode == GfxRenderer::BW) {
+        // BW only — grayscale passes are no-ops for 1-bit fonts.
+        // FB bit: 0 = ink (black), 1 = no-ink (white).
+        // mask has 1-bits where pixels should be drawn → clear those bits.
+        for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
+          uint8_t* rowPtr = fb + rowOff * renderer.panelWidthBytes;
+          for (int b = byteStart; b <= byteEnd; b++) {
+            uint8_t mask = 0;
+            for (int p = 0; p < 8; p++) {
+              const int pixelIdx = pixelOffset + b * 8 + p;
+              if (pixelIdx < width) {
+                const uint8_t byte = bitmap[pixelIdx >> 3];
+                if ((byte >> (7 - (pixelIdx & 7))) & 1) {
+                  mask |= (1 << (7 - p));
+                }
+              }
+            }
+            if (b == byteStart && b == byteEnd) {
+              mask &= headMask;
+            } else {
+              if (b == byteStart) mask &= headMask;
+              if (b == byteEnd)   mask &= tailMask;
+            }
+            rowPtr[b] &= ~mask;  // clear drawn bits (0 = ink)
           }
         }
       }
