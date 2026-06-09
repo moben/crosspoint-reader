@@ -137,26 +137,31 @@ planes. The display hardware interprets the BW+RED combination as 4 gray levels
 
 ### 3a. Grayscale Pass Architecture
 
-The rendering pipeline issues **three independent render passes** per glyph row.
-BW renders first (no clear), then each grayscale pass clears the framebuffer first
-(`clearScreen(0x00)`) and overwrites it. The BW content is saved before the sequence
-via `storeBwBuffer()` and restored after `displayGrayBuffer()` via `restoreBwBuffer()`,
-placing it on top of the grayscale planes for final display.
+The three-pass grayscale sequence is handled **at the activity level**, not inside
+`renderCharImpl`. `EpubReaderActivity` calls `page->render()` three times, each with
+a different `renderMode`:
 
 ```cpp
 // Pass 1 — BW (black text overgrays): all non-white pixels
 renderer.setRenderMode(GfxRenderer::BW);
-renderCharRow2Bit<orientation, rotation, BW>(...);  // mask = val < 3, fb &= ~mask
+renderer.storeBwBuffer();                          // save BW framebuffer
+page->render(renderer, ...);                       // renderCharImpl<..., BW>
 
 // Pass 2 — GRAYSCALE_LSB (BW RAM): dark gray only
 renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
 renderer.clearScreen(0x00);
-renderCharRow2Bit<orientation, rotation, GRAYSCALE_LSB>(...);  // mask = val == 2, fb |= mask
+page->render(renderer, ...);                       // renderCharImpl<..., GRAYSCALE_LSB>
+renderer.copyGrayscaleLsbBuffers();
 
 // Pass 3 — GRAYSCALE_MSB (RED RAM): dark + light gray
 renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
 renderer.clearScreen(0x00);
-renderCharRow2Bit<orientation, rotation, GRAYSCALE_MSB>(...);  // mask = val 1||2, fb |= mask
+page->render(renderer, ...);                       // renderCharImpl<..., GRAYSCALE_MSB>
+renderer.copyGrayscaleMsbBuffers();
+
+// Display grayscale overlay, then restore BW
+renderer.displayGrayBuffer();
+renderer.restoreBwBuffer();
 ```
 
 Each pass independently computes its mask and does its own RMW on the shared
@@ -170,13 +175,19 @@ The display hardware then interprets the two RAM planes together:
 | 1      | 0       | light gray    |
 | 0      | 0       | dark gray     |
 | 0      | 1       | black         |
+
+**Note:** `storeBwBuffer()` / `restoreBwBuffer()` are needed because grayscale passes
+overwrite the framebuffer. 1-bit fonts (no grayscale) skip both — they render directly
+to the framebuffer in a single BW pass.
+
 ### 4. Main `renderCharImpl` — Static Calculations Upfront
 
-`renderMode` is a template parameter (not a runtime member variable), so the compiler
-can eliminate dead branches. The caller invokes three separate instantiations:
+Both `orientation` and `renderMode` are template parameters, so the compiler can eliminate
+all dead branches — no runtime `switch` on orientation, no runtime comparison on renderMode.
 
 ```cpp
-template <TextRotation rotation, GfxRenderer::RenderMode renderMode>
+template <GfxRenderer::Orientation orientation, TextRotation rotation,
+          GfxRenderer::RenderMode renderMode>
 static void renderCharImpl(const GfxRenderer& renderer, ...) {
     // --- Glyph lookup (unchanged) ---
     const EpdGlyph* glyph = fontFamily.getGlyph(cp, style);
@@ -189,13 +200,14 @@ static void renderCharImpl(const GfxRenderer& renderer, ...) {
 
     // --- Hoisted: strip target selection ---
     uint8_t* fb = renderer.getWriteTarget();
-    int rowOffsetBase = renderer.getWriteOriginY();
+    int originY = renderer.getWriteOriginY();
     int writeRows = renderer.getWriteRows();
 
     // --- Row loop ---
     for (int glyphY = 0; glyphY < height; glyphY++) {
-        // Physical row offset computed once
-        int rowOffset = computePhysicalRowOffset(orientation, rotation, ...);
+        // Physical row offset — fully inlined, no runtime switch
+        // orientation is a template param → compiler emits one arithmetic expression
+        int rowOffset = computePhysicalRowOffset<orientation>(glyphY, ...);
 
         // Clip to strip bounds
         if (rowOffset < 0 || rowOffset >= writeRows) continue;
@@ -212,24 +224,82 @@ static void renderCharImpl(const GfxRenderer& renderer, ...) {
 }
 ```
 
-**Caller invocation** (from `drawText`):
-```cpp
-// BW pass
-renderCharImpl<TextRotation::None, GfxRenderer::BW>(renderer, ...);
+### 4a. Runtime Dispatch Wrapper
 
-// Grayscale passes (each preceded by clearScreen(0x00))
-renderCharImpl<TextRotation::None, GfxRenderer::GRAYSCALE_LSB>(renderer, ...);
-renderCharImpl<TextRotation::None, GfxRenderer::GRAYSCALE_MSB>(renderer, ...);
+`orientation` and `renderMode` are runtime values (`GfxRenderer` member variables), but
+they are **constant for the duration of a single `drawText` call**. We use a runtime
+`switch` to dispatch to the correct template instantiation — the switch executes once
+per `drawText` call (not per glyph, not per pixel), so overhead is negligible.
+
+```cpp
+// In drawText (called once per line of text):
+void drawText(const int fontId, const int x, const int y, const char* text, ...) const {
+    // ... font lookup, BiDi resolution, etc. ...
+
+    // Runtime dispatch — executed once per drawText call
+    switch (orientation) {
+        case Portrait:
+            switch (renderMode) {
+                case BW:           renderCharImpl<Portrait, TextRotation::None, BW>(...); break;
+                case GRAYSCALE_LSB: renderCharImpl<Portrait, TextRotation::None, GRAYSCALE_LSB>(...); break;
+                case GRAYSCALE_MSB: renderCharImpl<Portrait, TextRotation::None, GRAYSCALE_MSB>(...); break;
+            }
+            break;
+        case LandscapeClockwise:
+            switch (renderMode) {
+                case BW:           renderCharImpl<LandscapeClockwise, TextRotation::None, BW>(...); break;
+                case GRAYSCALE_LSB: renderCharImpl<LandscapeClockwise, TextRotation::None, GRAYSCALE_LSB>(...); break;
+                case GRAYSCALE_MSB: renderCharImpl<LandscapeClockwise, TextRotation::None, GRAYSCALE_MSB>(...); break;
+            }
+            break;
+        case PortraitInverted:
+            switch (renderMode) {
+                case BW:           renderCharImpl<PortraitInverted, TextRotation::None, BW>(...); break;
+                case GRAYSCALE_LSB: renderCharImpl<PortraitInverted, TextRotation::None, GRAYSCALE_LSB>(...); break;
+                case GRAYSCALE_MSB: renderCharImpl<PortraitInverted, TextRotation::None, GRAYSCALE_MSB>(...); break;
+            }
+            break;
+        case LandscapeCounterClockwise:
+            switch (renderMode) {
+                case BW:           renderCharImpl<LandscapeCounterClockwise, TextRotation::None, BW>(...); break;
+                case GRAYSCALE_LSB: renderCharImpl<LandscapeCounterClockwise, TextRotation::None, GRAYSCALE_LSB>(...); break;
+                case GRAYSCALE_MSB: renderCharImpl<LandscapeCounterClockwise, TextRotation::None, GRAYSCALE_MSB>(...); break;
+            }
+            break;
+    }
+}
 ```
 
-For 1-bit fonts the grayscale instantiations are never called, so the compiler won't emit
-them — only 16 instantiations (4 orientations × 2 rotations × 2 active modes) are produced.
+Similarly, `drawTextRotated90CW` dispatches to the `Rotated90CW` variants:
+```cpp
+// In drawTextRotated90CW:
+switch (orientation) {
+    case Portrait:
+        switch (renderMode) {
+            case BW:           renderCharImpl<Portrait, TextRotation::Rotated90CW, BW>(...); break;
+            case GRAYSCALE_LSB: renderCharImpl<Portrait, TextRotation::Rotated90CW, GRAYSCALE_LSB>(...); break;
+            case GRAYSCALE_MSB: renderCharImpl<Portrait, TextRotation::Rotated90CW, GRAYSCALE_MSB>(...); break;
+        }
+        break;
+    // ... 3 more orientation cases
+}
+```
 
 ### 5. Compile-Time Orientation Specialization
 
-The template `<orientation, rotation, renderMode>` produces up to **24 instantiations** (4 orientations × 2 rotations × 3 render modes). Each has the coordinate math fully inlined — no runtime switch in the pixel loop.
+The template `<orientation, rotation, renderMode>` produces exactly **24 instantiations**
+(4 orientations × 2 rotations × 3 render modes). Each has the coordinate math fully inlined
+— no runtime `switch` in the pixel loop.
 
-The compiler will eliminate dead branches (e.g., the `switch` for `orientation` becomes a single arithmetic expression). For 1-bit fonts the GRAYSCALE_LSB and GRAYSCALE_MSB instantiations are never called, so only 16 are emitted.
+The compiler will eliminate dead branches (e.g., the `switch` for `orientation`
+and `renderMode` become single arithmetic expressions). **All 24 instantiations
+are always emitted** because the dispatch `switch` in `drawText` references
+all of them. The compiler cannot prune any, even for 1-bit fonts where
+GRAYSCALE_LSB/GRAYSCALE_MSB are never called — the switch cases still exist and
+the linker sees them as reachable.
+
+This is acceptable: 24 × ~80 bytes ≈ **~2 KB** of code size, which is negligible against
+the ESP32-C3's 16 MB flash.
 
 ## Expected Performance Improvement per Render Pass
 
@@ -315,7 +385,10 @@ Already handled transparently by `getWriteTarget()` and `getWriteOriginY()`:
 
 ### Code Size Budget
 
-24 template instantiations × ~80 bytes each ≈ **~2 KB** of code size. This is acceptable against the ESP32-C3's 16 MB flash.
+24 template instantiations × ~80 bytes each ≈ **~2 KB** of code size. This is acceptable
+against the ESP32-C3's 16 MB flash. All 24 are always emitted (the dispatch switch in
+`drawText` references all of them, so the linker sees them as reachable even for 1-bit
+fonts where grayscale instantiations are never called).
 
 ### renderCharScaled — Deferred to v2
 
@@ -331,32 +404,38 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
 
 ## Implementation Steps
 
-1. **Create `renderCharRow1Bit`** template — byte-aligned 1-bit row processor with head/tail masks (same as §2)
-2. **Create `renderCharRow2Bit`** template — byte-aligned 2-bit row processor that:
+1. **Create `renderCharRow1Bit`** template — byte-aligned 1-bit row processor with head/tail masks (§2).
+   Template params: `<orientation, rotation, renderMode>`.
+
+2. **Create `renderCharRow2Bit`** template — byte-aligned 2-bit row processor (§3):
    - Extracts 8 pixels per framebuffer byte (2 bitmap bytes), builds a single `mask`
    - Uses `constexpr-if` on `renderMode` to select the mask condition:
      `val < 3` for BW, `val == 2` for GRAYSCALE_LSB, `val == 1 \|\| val == 2` for GRAYSCALE_MSB
    - Applies head/tail per-bit masks
    - Performs a single RMW: `fb &= ~mask` for BW, `fb |= mask` for grayscale passes
+   - Template params: `<orientation, rotation, renderMode>`
+
 3. **Refactor `renderCharImpl`** to:
-   - Add `renderMode` as a template parameter (not a runtime member variable)
-   - Hoist orientation rotation, strip target, physical coordinates upfront (unchanged)
-   - Compute per-row byte range and head/tail masks before the row loop (unchanged)
-   - For 2-bit fonts: call `renderCharRow2Bit` once per render pass. The `renderMode`
-     template parameter is a compile-time constant — `constexpr-if` selects the mask
-     condition and FB write operation, so the compiler eliminates dead branches.
-   - The **three-pass** architecture from §3a is handled outside this function: the caller
-     invokes `renderCharImpl<..., BW>`, then `renderCharImpl<..., GRAYSCALE_LSB>` (after
-     clearScreen), then `renderCharImpl<..., GRAYSCALE_MSB>` (after clearScreen)
-   - **Store/Restore**: before the three-pass sequence, the caller must call
-     `renderer.storeBwBuffer()` to save the BW framebuffer. After `displayGrayBuffer()`
-     and `restoreBwBuffer()`, the BW content is restored on top of the grayscale planes.
-     1-bit fonts (no grayscale) skip this entirely — they render directly to the
-     framebuffer in a single pass.
-4. **Verify correctness**: test all 24 orientation/rotation/mode combinations against existing output
-5. **Benchmark**: measure rendering time with profiling (the existing `start_ms` timing in `clearScreen`)
+   - Add `orientation` and `renderMode` as template parameters:
+     `<orientation, rotation, renderMode>`
+   - Hoist orientation rotation, strip target, physical coordinates upfront
+   - Compute per-row byte range and head/tail masks before the row loop
+   - Dispatch to `renderCharRow1Bit` or `renderCharRow2Bit` with the same template params
+   - The **three-pass** architecture stays at the activity level (caller invokes
+     `page->render()` three times with different `renderMode` settings)
+
+4. **Add runtime dispatch wrapper** in `drawText` and `drawTextRotated90CW`:
+   - Replace the direct `renderCharImpl<TextRotation::None>(...)` call with a nested
+     `switch (orientation) { case ...: switch (renderMode) { case ...: renderCharImpl<...>(...) } }`
+   - 12 dispatch cases per function, 24 total
+
+5. **Verify correctness**: test all 24 orientation/rotation/mode combinations against existing output
+6. **Benchmark**: measure rendering time with profiling (the existing `start_ms` timing in `clearScreen`)
 
 ## Files to Modify
 
-- `lib/GfxRenderer/GfxRenderer.cpp`: Replace the pixel-loop versions of `renderCharImpl<TextRotation::None>` and `renderCharImpl<TextRotation::Rotated90CW>` with the byte-aligned versions
+- `lib/GfxRenderer/GfxRenderer.cpp`:
+  - Replace the pixel-loop `renderCharImpl<TextRotation::None>` and `renderCharImpl<TextRotation::Rotated90CW>` with the byte-aligned `<orientation, rotation, renderMode>` versions
+  - Add `renderCharRow1Bit` and `renderCharRow2Bit` helper templates
+  - Add nested `switch` dispatch in `drawText()` and `drawTextRotated90CW()` to route to the correct instantiation
 - `TODO.md`: This file — tracks the optimization plan and implementation status
