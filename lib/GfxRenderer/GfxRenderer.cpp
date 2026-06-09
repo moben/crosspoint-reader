@@ -144,16 +144,6 @@ enum class TextRotation { None, Rotated90CW };
 // applies head/tail masks, then performs exactly ONE read-modify-write on
 // the framebuffer.  Eliminates all per-pixel drawPixel() calls and RMWs.
 // ---------------------------------------------------------------------------
-
-template <GfxRenderer::Orientation orientation, TextRotation rotation,
-          GfxRenderer::RenderMode renderMode>
-static void renderCharRow1Bit(uint8_t* const fb,
-                              const uint8_t* const bitmap,
-                              int rowOffset, int byteStart, int byteEnd,
-                              uint8_t headMask, uint8_t tailMask,
-                              int glyphWidth, int pixelOffset);
-
-// --- Implementation: 1-bit row processor ---
 template <GfxRenderer::Orientation orientation, TextRotation rotation,
           GfxRenderer::RenderMode renderMode>
 static void renderCharRow1Bit(uint8_t* const fb,
@@ -192,16 +182,6 @@ static void renderCharRow1Bit(uint8_t* const fb,
 // single mask per renderMode pass, applies head/tail masks, then performs
 // exactly ONE RMW per framebuffer byte.
 // ---------------------------------------------------------------------------
-
-template <GfxRenderer::Orientation orientation, TextRotation rotation,
-          GfxRenderer::RenderMode renderMode>
-static void renderCharRow2Bit(uint8_t* const fb,
-                              const uint8_t* const bitmap,
-                              int rowOffset, int byteStart, int byteEnd,
-                              uint8_t headMask, uint8_t tailMask,
-                              int glyphWidth, int pixelOffset);
-
-// --- Implementation: 2-bit row processor ---
 template <GfxRenderer::Orientation orientation, TextRotation rotation,
           GfxRenderer::RenderMode renderMode>
 static void renderCharRow2Bit(uint8_t* const fb,
