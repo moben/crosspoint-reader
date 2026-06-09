@@ -188,6 +188,70 @@ static void renderCharRow1Bit(const uint8_t* restrict fb,
   }
 }
 
+// ---------------------------------------------------------------------------
+// Byte-aligned row processor — 2-bit fonts
+// ---------------------------------------------------------------------------
+// Extracts 8 pixels per framebuffer byte from the 2-bit bitmap, builds a
+// single mask per renderMode pass, applies head/tail masks, then performs
+// exactly ONE RMW per framebuffer byte.
+// ---------------------------------------------------------------------------
+
+template <GfxRenderer::Orientation orientation, TextRotation rotation,
+          GfxRenderer::RenderMode renderMode>
+static void renderCharRow2Bit(const uint8_t* restrict fb,
+                              const uint8_t* restrict bitmap,
+                              int rowOffset, int byteStart, int byteEnd,
+                              uint8_t headMask, uint8_t tailMask,
+                              int glyphWidth, int pixelOffset);
+
+// --- Implementation: 2-bit row processor ---
+template <GfxRenderer::Orientation orientation, TextRotation rotation,
+          GfxRenderer::RenderMode renderMode>
+static void renderCharRow2Bit(const uint8_t* restrict fb,
+                              const uint8_t* restrict bitmap,
+                              int rowOffset, int byteStart, int byteEnd,
+                              uint8_t headMask, uint8_t tailMask,
+                              int glyphWidth, int pixelOffset) {
+  // FB bit: 0 = ink (BW), 1 = gray (grayscale passes).
+  // mask has 1-bits where pixels should be drawn.
+  for (int b = byteStart; b <= byteEnd; b++) {
+    uint8_t mask = 0;
+    for (int p = 0; p < 8; p++) {
+      const int pixelIdx = pixelOffset + b * 4 + p / 2;  // 4 pixels per bitmap byte
+      if (pixelIdx < glyphWidth) {
+        const uint8_t byte = bitmap[pixelIdx >> 2];
+        const uint8_t val = ((byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3);
+        // val: 0=white, 1=light-gray, 2=dark-gray, 3=black
+        // Inverted for display: 0=black, 1=dark-grey, 2=light-grey, 3=white
+        const uint8_t bmpVal = 3 - val;
+
+        if constexpr (renderMode == GfxRenderer::BW) {
+          // BW pass: draw all non-white pixels (val < 3 → bmpVal > 0)
+          if (bmpVal > 0) mask |= (1 << (7 - p));
+        } else if constexpr (renderMode == GfxRenderer::GRAYSCALE_LSB) {
+          // GRAYSCALE_LSB: dark gray only (bmpVal == 1)
+          if (bmpVal == 1) mask |= (1 << (7 - p));
+        } else {  // GRAYSCALE_MSB
+          // GRAYSCALE_MSB: dark + light gray (bmpVal == 1 || bmpVal == 2)
+          if (bmpVal == 1 || bmpVal == 2) mask |= (1 << (7 - p));
+        }
+      }
+    }
+    if (b == byteStart && b == byteEnd) {
+      mask &= headMask;
+    } else {
+      if (b == byteStart) mask &= headMask;
+      if (b == byteEnd)   mask &= tailMask;
+    }
+    // BW: clear drawn bits (0 = ink). Grayscale: set drawn bits (1 = gray).
+    if constexpr (renderMode == GfxRenderer::BW) {
+      fb[rowOffset + b] &= ~mask;
+    } else {
+      fb[rowOffset + b] |= mask;
+    }
+  }
+}
+
 // Shared glyph rendering logic for normal and rotated text.
 // Coordinate mapping and cursor advance direction are selected at compile time via the template parameter.
 // Render a glyph at 50% scale. Used for SUP/SUB style bits.
