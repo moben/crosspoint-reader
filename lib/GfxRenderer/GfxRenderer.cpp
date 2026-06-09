@@ -143,15 +143,12 @@ enum class TextRotation { None, Rotated90CW };
 // pixels. For each byte: extracts up to 8 bitmap bits into a single mask,
 // applies head/tail masks, then performs exactly ONE read-modify-write on
 // the framebuffer.  Eliminates all per-pixel drawPixel() calls and RMWs.
-//
-// Template parameters are compile-time constants so the compiler emits one
-// arithmetic expression for physical-row offset (no runtime switch).
 // ---------------------------------------------------------------------------
 
 template <GfxRenderer::Orientation orientation, TextRotation rotation,
           GfxRenderer::RenderMode renderMode>
-static void renderCharRow1Bit(const uint8_t* restrict fb,
-                              const uint8_t* restrict bitmap,
+static void renderCharRow1Bit(uint8_t* const fb,
+                              const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
                               int glyphWidth, int pixelOffset);
@@ -159,8 +156,8 @@ static void renderCharRow1Bit(const uint8_t* restrict fb,
 // --- Implementation: 1-bit row processor ---
 template <GfxRenderer::Orientation orientation, TextRotation rotation,
           GfxRenderer::RenderMode renderMode>
-static void renderCharRow1Bit(const uint8_t* restrict fb,
-                              const uint8_t* restrict bitmap,
+static void renderCharRow1Bit(uint8_t* const fb,
+                              const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
                               int glyphWidth, int pixelOffset) {
@@ -198,8 +195,8 @@ static void renderCharRow1Bit(const uint8_t* restrict fb,
 
 template <GfxRenderer::Orientation orientation, TextRotation rotation,
           GfxRenderer::RenderMode renderMode>
-static void renderCharRow2Bit(const uint8_t* restrict fb,
-                              const uint8_t* restrict bitmap,
+static void renderCharRow2Bit(uint8_t* const fb,
+                              const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
                               int glyphWidth, int pixelOffset);
@@ -207,8 +204,8 @@ static void renderCharRow2Bit(const uint8_t* restrict fb,
 // --- Implementation: 2-bit row processor ---
 template <GfxRenderer::Orientation orientation, TextRotation rotation,
           GfxRenderer::RenderMode renderMode>
-static void renderCharRow2Bit(const uint8_t* restrict fb,
-                              const uint8_t* restrict bitmap,
+static void renderCharRow2Bit(uint8_t* const fb,
+                              const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
                               int glyphWidth, int pixelOffset) {
@@ -333,7 +330,9 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
 // ---------------------------------------------------------------------------
 // Adds <orientation, rotation, renderMode> as template parameters so that:
 //   - Physical coordinate math is fully inlined (no runtime switch)
-//   - Dead branches for renderMode are eliminated by the compiler
+//     rotateCoordinates() is always_inline; with a constant orientation the
+//     compiler DCEs all dead switch arms at compile time.
+//   - Dead branches for renderMode are eliminated by constexpr-if
 //   - The three-pass grayscale architecture stays at the activity level
 // ---------------------------------------------------------------------------
 
@@ -354,7 +353,7 @@ static void renderCharImpl(const GfxRenderer& renderer,
   const uint8_t width = glyph->width;
   const uint8_t height = glyph->height;
   const int left = glyph->left;
-  const top = glyph->top;
+  const int top = glyph->top;
 
   // Tiled-grayscale band culling: if this glyph's physical y-extent is entirely
   // outside the active strip, skip it before the expensive bitmap decode. This
@@ -381,93 +380,54 @@ static void renderCharImpl(const GfxRenderer& renderer,
   int originY = renderer.getWriteOriginY();
   int writeRows = renderer.getWriteRows();
 
-  // --- Hoisted: compute logical-to-physical row offset at compile time ---
-  // orientation is a template param → compiler emits one arithmetic expression.
-  // For Normal text, glyph rows map to physical Y; for Rotated90CW, they map
-  // to physical X (handled by the inner loop below).
+  // For Normal text: outer loop = glyphY (→ screenY), inner = glyphX (→ screenX)
+  // For Rotated90CW: outer loop = glyphY (→ screenX), inner = glyphX (→ screenY, reversed)
+  const int outerBase = cursorY - top;   // screenY base for Normal text
+  const int innerBase = cursorX + left;  // screenX base for Normal text
 
   if (is2Bit) {
     // --- 2-bit: byte-aligned row processor ---
-    // Layout: outer = glyphY (row), inner = glyphX (pixel within row)
-    // For Normal: screenY = outerBase + glyphY, screenX = innerBase + glyphX
-    // For Rotated90CW: screenX = outerBase + glyphY, screenY = innerBase - glyphX
-
-    const int outerBase = cursorY - top;       // screenY base for Normal
-    const int innerBase = cursorX + left;      // screenX base for Normal
-
     for (int glyphY = 0; glyphY < height; glyphY++) {
-      // Compute physical row offset for this glyph row.
-      // For orientation Portrait: logical Y → physical X via rotateCoordinates,
-      // so a glyph row (constant logical Y) maps to a constant physical X column.
-      // We need the physical Y range that this row occupies.
-      int phyRowMin = 0, phyRowMax = 0;
-
-      if constexpr (orientation == GfxRenderer::Portrait) {
-        // Portrait: screenY → phyX, screenX → panelHeight-1-phyY
-        // glyph row at logical Y maps to physical X = glyphY + outerBase...
-        // but we need the physical Y extent.
-        const int logY0 = outerBase + glyphY;
-        const int logY1 = outerBase + glyphY;  // single row
-        const int logX0 = innerBase;
-        const int logX1 = innerBase + width - 1;
-
-        int px0, py0, px1, py1;
-        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
-        rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
-        phyRowMin = std::min(py0, py1);
-        phyRowMax = std::max(py0, py1);
-      } else if constexpr (orientation == GfxRenderer::LandscapeClockwise) {
-        const int logY0 = outerBase + glyphY;
-        const int logY1 = outerBase + glyphY;
-        const int logX0 = innerBase;
-        const int logX1 = innerBase + width - 1;
-
-        int px0, py0, px1, py1;
-        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
-        rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
-        phyRowMin = std::min(py0, py1);
-        phyRowMax = std::max(py0, py1);
-      } else if constexpr (orientation == GfxRenderer::PortraitInverted) {
-        const int logY0 = outerBase + glyphY;
-        const int logY1 = outerBase + glyphY;
-        const int logX0 = innerBase;
-        const int logX1 = innerBase + width - 1;
-
-        int px0, py0, px1, py1;
-        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
-        rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
-        phyRowMin = std::min(py0, py1);
-        phyRowMax = std::max(py0, py1);
-      } else {  // LandscapeCounterClockwise
-        const int logY0 = outerBase + glyphY;
-        const int logY1 = outerBase + glyphY;
-        const int logX0 = innerBase;
-        const int logX1 = innerBase + width - 1;
-
-        int px0, py0, px1, py1;
-        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
-        rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
-        phyRowMin = std::min(py0, py1);
-        phyRowMax = std::max(py0, py1);
+      // Compute physical Y range for this glyph row.
+      // The glyph row spans logical coords:
+      //   Normal:     logY = outerBase+glyphY,  logX ∈ [innerBase .. innerBase+width-1]
+      //   Rotated90CW: screenX = outerBase+glyphY, screenY ∈ [innerBase-(innerBase), innerBase-(innerBase+width-1)]
+      int logY0, logY1, logX0, logX1;
+      if constexpr (rotation == TextRotation::Rotated90CW) {
+        // outerBase = cursorX + fontData->ascender - top  → this is screenX for rotated
+        // innerBase = cursorY - left                       → this is screenY base
+        const int screenX = outerBase + glyphY;
+        logY0 = innerBase - (width - 1);   // screenY at glyphX=width-1 (reversed)
+        logY1 = innerBase;                 // screenY at glyphX=0
+        logX0 = screenX;
+        logX1 = screenX;
+      } else {
+        logY0 = outerBase + glyphY;
+        logY1 = outerBase + glyphY;
+        logX0 = innerBase;
+        logX1 = innerBase + width - 1;
       }
+
+      int px0, py0, px1, py1;
+      rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.getDisplayWidth(), renderer.getDisplayHeight());
+      rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.getDisplayWidth(), renderer.getDisplayHeight());
+
+      const int phyRowMin = (py0 < py1) ? py0 : py1;
+      const int phyRowMax = (py0 > py1) ? py0 : py1;
 
       // Clip to strip bounds
       if (phyRowMax < originY || phyRowMin >= originY + writeRows) continue;
 
-      int rowOffsetStart = std::max(phyRowMin - originY, 0);
-      int rowOffsetEnd = std::min(phyRowMax - originY, writeRows - 1);
+      const int rowOffsetStart = std::max(phyRowMin - originY, 0);
+      const int rowOffsetEnd = std::min(phyRowMax - originY, writeRows - 1);
 
       // Compute physical X range for head/tail masks
-      const int logY0 = outerBase + glyphY;
-      const int logX0 = innerBase;
-      const int logX1 = innerBase + width - 1;
-
       int pxHead, pyHead, pxTail, pyTail;
-      rotateCoordinates(orientation, logX0, logY0, &pxHead, &pyHead, renderer.panelWidth, renderer.panelHeight);
-      rotateCoordinates(orientation, logX1, logY0, &pxTail, &pyTail, renderer.panelWidth, renderer.panelHeight);
+      rotateCoordinates(orientation, logX0, logY0, &pxHead, &pyHead, renderer.getDisplayWidth(), renderer.getDisplayHeight());
+      rotateCoordinates(orientation, logX1, logY0, &pxTail, &pyTail, renderer.getDisplayWidth(), renderer.getDisplayHeight());
 
-      int phyXMin = std::min(pxHead, pxTail);
-      int phyXMax = std::max(pxHead, pxTail);
+      const int phyXMin = (pxHead < pxTail) ? pxHead : pxTail;
+      const int phyXMax = (pxHead > pxTail) ? pxHead : pxTail;
 
       // Compute byte range within the physical row
       const int byteStart = phyXMin >> 3;
@@ -475,13 +435,13 @@ static void renderCharImpl(const GfxRenderer& renderer,
       const uint8_t headMask = static_cast<uint8_t>(0xFFu >> (phyXMin & 7));
       const uint8_t tailMask = static_cast<uint8_t>(0xFFu << (7 - (phyXMax & 7)));
 
-      // Pixel offset into the bitmap for this row
+      // Pixel offset into the bitmap for this row (4 pixels per bitmap byte for 2-bit)
       const int pixelOffset = glyphY * ((width + 3) / 4);
 
       if constexpr (renderMode == GfxRenderer::BW) {
         // BW pass: draw all non-white pixels (val < 3 → fb bit 0 = ink)
         for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-          uint8_t* rowPtr = fb + rowOff * renderer.panelWidthBytes;
+          uint8_t* rowPtr = fb + rowOff * renderer.getDisplayWidthBytes();
           for (int b = byteStart; b <= byteEnd; b++) {
             uint8_t mask = 0;
             for (int p = 0; p < 8; p++) {
@@ -489,10 +449,8 @@ static void renderCharImpl(const GfxRenderer& renderer,
               if (pixelIdx < width) {
                 const uint8_t byte = bitmap[pixelIdx >> 2];
                 const uint8_t val = ((byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3);
-                // val: 0=white, 1=light-gray, 2=dark-gray, 3=black
-                // Inverted: 0=black, 1=dark-grey, 2=light-grey, 3=white
                 const uint8_t bmpVal = 3 - val;
-                if (bmpVal < 3) {  // non-white → draw
+                if (bmpVal > 0) {  // non-white → draw
                   mask |= (1 << (7 - p));
                 }
               }
@@ -507,9 +465,9 @@ static void renderCharImpl(const GfxRenderer& renderer,
           }
         }
       } else if constexpr (renderMode == GfxRenderer::GRAYSCALE_LSB) {
-        // GRAYSCALE_LSB pass: dark gray only (val == 2 → bmpVal == 1)
+        // GRAYSCALE_LSB pass: dark gray only (bmpVal == 1)
         for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-          uint8_t* rowPtr = fb + rowOff * renderer.panelWidthBytes;
+          uint8_t* rowPtr = fb + rowOff * renderer.getDisplayWidthBytes();
           for (int b = byteStart; b <= byteEnd; b++) {
             uint8_t mask = 0;
             for (int p = 0; p < 8; p++) {
@@ -518,7 +476,7 @@ static void renderCharImpl(const GfxRenderer& renderer,
                 const uint8_t byte = bitmap[pixelIdx >> 2];
                 const uint8_t val = ((byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3);
                 const uint8_t bmpVal = 3 - val;
-                if (bmpVal == 1) {  // dark gray → draw in LSB
+                if (bmpVal == 1) {
                   mask |= (1 << (7 - p));
                 }
               }
@@ -533,9 +491,9 @@ static void renderCharImpl(const GfxRenderer& renderer,
           }
         }
       } else {  // GRAYSCALE_MSB
-        // GRAYSCALE_MSB pass: dark + light gray (val == 1 || val == 2 → bmpVal == 1 || bmpVal == 2)
+        // GRAYSCALE_MSB pass: dark + light gray (bmpVal == 1 || bmpVal == 2)
         for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-          uint8_t* rowPtr = fb + rowOff * renderer.panelWidthBytes;
+          uint8_t* rowPtr = fb + rowOff * renderer.getDisplayWidthBytes();
           for (int b = byteStart; b <= byteEnd; b++) {
             uint8_t mask = 0;
             for (int p = 0; p < 8; p++) {
@@ -544,7 +502,7 @@ static void renderCharImpl(const GfxRenderer& renderer,
                 const uint8_t byte = bitmap[pixelIdx >> 2];
                 const uint8_t val = ((byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3);
                 const uint8_t bmpVal = 3 - val;
-                if (bmpVal == 1 || bmpVal == 2) {  // light or dark gray → draw in MSB
+                if (bmpVal == 1 || bmpVal == 2) {
                   mask |= (1 << (7 - p));
                 }
               }
@@ -561,73 +519,42 @@ static void renderCharImpl(const GfxRenderer& renderer,
       }
     }
   } else {
-    // --- 1-bit: use the byte-aligned row processor ---
-    const int outerBase = cursorY - top;   // screenY base for Normal
-    const int innerBase = cursorX + left;  // screenX base for Normal
-
+    // --- 1-bit: byte-aligned row processor ---
     for (int glyphY = 0; glyphY < height; glyphY++) {
-      // Compute physical row extent for this glyph row.
-      int phyRowMin = 0, phyRowMax = 0;
-
-      if constexpr (orientation == GfxRenderer::Portrait) {
-        const int logY0 = outerBase + glyphY;
-        const int logX0 = innerBase;
-        const int logX1 = innerBase + width - 1;
-
-        int px0, py0, px1, py1;
-        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
-        rotateCoordinates(orientation, logX1, logY0, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
-        phyRowMin = std::min(py0, py1);
-        phyRowMax = std::max(py0, py1);
-      } else if constexpr (orientation == GfxRenderer::LandscapeClockwise) {
-        const int logY0 = outerBase + glyphY;
-        const int logX0 = innerBase;
-        const int logX1 = innerBase + width - 1;
-
-        int px0, py0, px1, py1;
-        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
-        rotateCoordinates(orientation, logX1, logY0, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
-        phyRowMin = std::min(py0, py1);
-        phyRowMax = std::max(py0, py1);
-      } else if constexpr (orientation == GfxRenderer::PortraitInverted) {
-        const int logY0 = outerBase + glyphY;
-        const int logX0 = innerBase;
-        const int logX1 = innerBase + width - 1;
-
-        int px0, py0, px1, py1;
-        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
-        rotateCoordinates(orientation, logX1, logY0, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
-        phyRowMin = std::min(py0, py1);
-        phyRowMax = std::max(py0, py1);
-      } else {  // LandscapeCounterClockwise
-        const int logY0 = outerBase + glyphY;
-        const int logX0 = innerBase;
-        const int logX1 = innerBase + width - 1;
-
-        int px0, py0, px1, py1;
-        rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.panelWidth, renderer.panelHeight);
-        rotateCoordinates(orientation, logX1, logY0, &px1, &py1, renderer.panelWidth, renderer.panelHeight);
-        phyRowMin = std::min(py0, py1);
-        phyRowMax = std::max(py0, py1);
+      int logY0, logY1, logX0, logX1;
+      if constexpr (rotation == TextRotation::Rotated90CW) {
+        const int screenX = outerBase + glyphY;
+        logY0 = innerBase - (width - 1);
+        logY1 = innerBase;
+        logX0 = screenX;
+        logX1 = screenX;
+      } else {
+        logY0 = outerBase + glyphY;
+        logY1 = outerBase + glyphY;
+        logX0 = innerBase;
+        logX1 = innerBase + width - 1;
       }
+
+      int px0, py0, px1, py1;
+      rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.getDisplayWidth(), renderer.getDisplayHeight());
+      rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.getDisplayWidth(), renderer.getDisplayHeight());
+
+      const int phyRowMin = (py0 < py1) ? py0 : py1;
+      const int phyRowMax = (py0 > py1) ? py0 : py1;
 
       // Clip to strip bounds
       if (phyRowMax < originY || phyRowMin >= originY + writeRows) continue;
 
-      int rowOffsetStart = std::max(phyRowMin - originY, 0);
-      int rowOffsetEnd = std::min(phyRowMax - originY, writeRows - 1);
+      const int rowOffsetStart = std::max(phyRowMin - originY, 0);
+      const int rowOffsetEnd = std::min(phyRowMax - originY, writeRows - 1);
 
       // Compute physical X range for head/tail masks
-      const int logY0 = outerBase + glyphY;
-      const int logX0 = innerBase;
-      const int logX1 = innerBase + width - 1;
-
       int pxHead, pyHead, pxTail, pyTail;
-      rotateCoordinates(orientation, logX0, logY0, &pxHead, &pyHead, renderer.panelWidth, renderer.panelHeight);
-      rotateCoordinates(orientation, logX1, logY0, &pxTail, &pyTail, renderer.panelWidth, renderer.panelHeight);
+      rotateCoordinates(orientation, logX0, logY0, &pxHead, &pyHead, renderer.getDisplayWidth(), renderer.getDisplayHeight());
+      rotateCoordinates(orientation, logX1, logY0, &pxTail, &pyTail, renderer.getDisplayWidth(), renderer.getDisplayHeight());
 
-      int phyXMin = std::min(pxHead, pxTail);
-      int phyXMax = std::max(pxHead, pxTail);
+      const int phyXMin = (pxHead < pxTail) ? pxHead : pxTail;
+      const int phyXMax = (pxHead > pxTail) ? pxHead : pxTail;
 
       // Compute byte range within the physical row
       const int byteStart = phyXMin >> 3;
@@ -635,34 +562,32 @@ static void renderCharImpl(const GfxRenderer& renderer,
       const uint8_t headMask = static_cast<uint8_t>(0xFFu >> (phyXMin & 7));
       const uint8_t tailMask = static_cast<uint8_t>(0xFFu << (7 - (phyXMax & 7)));
 
-      // Pixel offset into the bitmap for this row
+      // Pixel offset into the bitmap for this row (8 pixels per bitmap byte for 1-bit)
       const int pixelOffset = glyphY * ((width + 7) / 8);
 
-      if constexpr (renderMode == GfxRenderer::BW) {
-        // BW only — grayscale passes are no-ops for 1-bit fonts.
-        // FB bit: 0 = ink (black), 1 = no-ink (white).
-        // mask has 1-bits where pixels should be drawn → clear those bits.
-        for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-          uint8_t* rowPtr = fb + rowOff * renderer.panelWidthBytes;
-          for (int b = byteStart; b <= byteEnd; b++) {
-            uint8_t mask = 0;
-            for (int p = 0; p < 8; p++) {
-              const int pixelIdx = pixelOffset + b * 8 + p;
-              if (pixelIdx < width) {
-                const uint8_t byte = bitmap[pixelIdx >> 3];
-                if ((byte >> (7 - (pixelIdx & 7))) & 1) {
-                  mask |= (1 << (7 - p));
-                }
+      // BW only — grayscale passes are no-ops for 1-bit fonts.
+      // FB bit: 0 = ink (black), 1 = no-ink (white).
+      // mask has 1-bits where pixels should be drawn → clear those bits.
+      for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
+        uint8_t* rowPtr = fb + rowOff * renderer.getDisplayWidthBytes();
+        for (int b = byteStart; b <= byteEnd; b++) {
+          uint8_t mask = 0;
+          for (int p = 0; p < 8; p++) {
+            const int pixelIdx = pixelOffset + b * 8 + p;
+            if (pixelIdx < width) {
+              const uint8_t byte = bitmap[pixelIdx >> 3];
+              if ((byte >> (7 - (pixelIdx & 7))) & 1) {
+                mask |= (1 << (7 - p));
               }
             }
-            if (b == byteStart && b == byteEnd) {
-              mask &= headMask;
-            } else {
-              if (b == byteStart) mask &= headMask;
-              if (b == byteEnd)   mask &= tailMask;
-            }
-            rowPtr[b] &= ~mask;  // clear drawn bits (0 = ink)
           }
+          if (b == byteStart && b == byteEnd) {
+            mask &= headMask;
+          } else {
+            if (b == byteStart) mask &= headMask;
+            if (b == byteEnd)   mask &= tailMask;
+          }
+          rowPtr[b] &= ~mask;  // clear drawn bits (0 = ink)
         }
       }
     }
@@ -733,6 +658,154 @@ void GfxRenderer::drawCenteredText(const int fontId, const int y, const char* te
   drawText(fontId, x, y, text, black, style, baseDir);
 }
 
+// Runtime dispatch helper — routes to the correct <orientation, rotation, renderMode>
+// template instantiation. orientation and renderMode are runtime values on GfxRenderer
+// but constant for the duration of a single drawText call, so the switch executes once
+// per character (not per pixel).
+static inline void dispatchRenderCharImpl(const GfxRenderer& renderer, TextRotation rotation,
+                                          const EpdFontFamily& fontFamily, uint32_t cp,
+                                          int cursorX, int cursorY, bool black,
+                                          EpdFontFamily::Style style) {
+  switch (renderer.getOrientation()) {
+    case GfxRenderer::Portrait:
+      switch (renderer.getRenderMode()) {
+        case GfxRenderer::BW:
+          renderCharImpl<GfxRenderer::Portrait, TextRotation::None, GfxRenderer::BW>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_LSB:
+          renderCharImpl<GfxRenderer::Portrait, TextRotation::None, GfxRenderer::GRAYSCALE_LSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_MSB:
+          renderCharImpl<GfxRenderer::Portrait, TextRotation::None, GfxRenderer::GRAYSCALE_MSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+      }
+      break;
+    case GfxRenderer::LandscapeClockwise:
+      switch (renderer.getRenderMode()) {
+        case GfxRenderer::BW:
+          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::None, GfxRenderer::BW>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_LSB:
+          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::None, GfxRenderer::GRAYSCALE_LSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_MSB:
+          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::None, GfxRenderer::GRAYSCALE_MSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+      }
+      break;
+    case GfxRenderer::PortraitInverted:
+      switch (renderer.getRenderMode()) {
+        case GfxRenderer::BW:
+          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::None, GfxRenderer::BW>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_LSB:
+          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::None, GfxRenderer::GRAYSCALE_LSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_MSB:
+          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::None, GfxRenderer::GRAYSCALE_MSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+      }
+      break;
+    case GfxRenderer::LandscapeCounterClockwise:
+      switch (renderer.getRenderMode()) {
+        case GfxRenderer::BW:
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::None, GfxRenderer::BW>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_LSB:
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::None, GfxRenderer::GRAYSCALE_LSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_MSB:
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::None, GfxRenderer::GRAYSCALE_MSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+      }
+      break;
+  }
+}
+
+static inline void dispatchRenderCharImplRotated(const GfxRenderer& renderer,
+                                                 const EpdFontFamily& fontFamily, uint32_t cp,
+                                                 int cursorX, int cursorY, bool black,
+                                                 EpdFontFamily::Style style) {
+  switch (renderer.getOrientation()) {
+    case GfxRenderer::Portrait:
+      switch (renderer.getRenderMode()) {
+        case GfxRenderer::BW:
+          renderCharImpl<GfxRenderer::Portrait, TextRotation::Rotated90CW, GfxRenderer::BW>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_LSB:
+          renderCharImpl<GfxRenderer::Portrait, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_LSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_MSB:
+          renderCharImpl<GfxRenderer::Portrait, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_MSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+      }
+      break;
+    case GfxRenderer::LandscapeClockwise:
+      switch (renderer.getRenderMode()) {
+        case GfxRenderer::BW:
+          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::Rotated90CW, GfxRenderer::BW>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_LSB:
+          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_LSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_MSB:
+          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_MSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+      }
+      break;
+    case GfxRenderer::PortraitInverted:
+      switch (renderer.getRenderMode()) {
+        case GfxRenderer::BW:
+          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::Rotated90CW, GfxRenderer::BW>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_LSB:
+          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_LSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_MSB:
+          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_MSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+      }
+      break;
+    case GfxRenderer::LandscapeCounterClockwise:
+      switch (renderer.getRenderMode()) {
+        case GfxRenderer::BW:
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::Rotated90CW, GfxRenderer::BW>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_LSB:
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_LSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+        case GfxRenderer::GRAYSCALE_MSB:
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_MSB>(
+              renderer, fontFamily, cp, cursorX, cursorY, black, style);
+          break;
+      }
+      break;
+  }
+}
+
 void GfxRenderer::drawText(const int fontId, const int x, const int y, const char* text, const bool black,
                            const EpdFontFamily::Style style, const BidiUtils::BidiBaseDir baseDir) const {
   // cannot draw a NULL / empty string
@@ -778,7 +851,7 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
       const int raiseBy = combiningMark::raiseAboveBase(combiningGlyph->top, combiningGlyph->height, lastBaseTop);
       const int combiningX = combiningMark::centerOver(lastBaseX, lastBaseLeft, lastBaseWidth, combiningGlyph->left,
                                                        combiningGlyph->width);
-      renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, combiningX, yPos - raiseBy, black, style);
+      dispatchRenderCharImpl(*this, TextRotation::None, font, cp, combiningX, yPos - raiseBy, black, style);
       continue;
     }
 
@@ -810,7 +883,7 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
       // yPos already carries the vertical offset applied by TextBlock::render().
       renderCharScaled(*this, renderMode, font, cp, lastBaseX, yPos, black, style);
     } else {
-      renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, lastBaseX, yPos, black, style);
+      dispatchRenderCharImpl(*this, TextRotation::None, font, cp, lastBaseX, yPos, black, style);
     }
     prevCp = cp;
   }
@@ -2078,7 +2151,7 @@ void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y
       const int combiningX = x - raiseBy;
       const int combiningY = combiningMark::centerOverRotated90CW(lastBaseY, lastBaseLeft, lastBaseWidth,
                                                                   combiningGlyph->left, combiningGlyph->width);
-      renderCharImpl<TextRotation::Rotated90CW>(*this, renderMode, font, cp, combiningX, combiningY, black, style);
+      dispatchRenderCharImplRotated(*this, font, cp, combiningX, combiningY, black, style);
       continue;
     }
 
@@ -2098,7 +2171,7 @@ void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y
     lastBaseTop = glyph ? glyph->top : 0;
     prevAdvanceFP = glyph ? glyph->advanceX : 0;  // 12.4 fixed-point
 
-    renderCharImpl<TextRotation::Rotated90CW>(*this, renderMode, font, cp, x, lastBaseY, black, style);
+    dispatchRenderCharImplRotated(*this, font, cp, x, lastBaseY, black, style);
     prevCp = cp;
   }
 }
