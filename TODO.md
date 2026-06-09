@@ -28,8 +28,8 @@ A static template function that processes one glyph row by iterating over frameb
 // For 1-bit mode:
 template <GfxRenderer::Orientation orientation, TextRotation rotation,
           GfxRenderer::RenderMode renderMode>
-static void renderCharRow1Bit(const uint8_t* restrict fb,
-                              const uint8_t* restrict bitmap,
+static void renderCharRow1Bit(const uint8_t* fb,
+                              const uint8_t* bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
                               int glyphWidth, int pixelOffset);
@@ -37,8 +37,8 @@ static void renderCharRow1Bit(const uint8_t* restrict fb,
 // For 2-bit mode:
 template <GfxRenderer::Orientation orientation, TextRotation rotation,
           GfxRenderer::RenderMode renderMode>
-static void renderCharRow2Bit(const uint8_t* restrict fb,
-                              const uint8_t* restrict bitmap,
+static void renderCharRow2Bit(const uint8_t* fb,
+                              const uint8_t* bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
                               int glyphWidth, int pixelOffset);
