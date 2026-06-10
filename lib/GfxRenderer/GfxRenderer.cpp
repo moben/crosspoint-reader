@@ -420,84 +420,12 @@ static void renderCharImpl(const GfxRenderer& renderer,
       // Pixel offset into the bitmap for this row (4 pixels per bitmap byte for 2-bit)
       const int pixelOffset = glyphY * ((width + 3) / 4);
 
-      if constexpr (renderMode == GfxRenderer::BW) {
-        // BW pass: draw all non-white pixels (val < 3 → fb bit 0 = ink)
-        for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-          uint8_t* rowPtr = fb + rowOff * renderer.getDisplayWidthBytes();
-          for (int b = byteStart; b <= byteEnd; b++) {
-            uint8_t mask = 0;
-            for (int p = 0; p < 8; p++) {
-              const int pixelIdx = pixelOffset + b * 4 + p / 2;  // 4 pixels per byte for 2-bit
-              if (pixelIdx < width) {
-                const uint8_t byte = bitmap[pixelIdx >> 2];
-                const uint8_t val = ((byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3);
-                const uint8_t bmpVal = 3 - val;
-                if (bmpVal > 0) {  // non-white → draw
-                  mask |= (1 << (7 - p));
-                }
-              }
-            }
-            if (b == byteStart && b == byteEnd) {
-              mask &= headMask;
-            } else {
-              if (b == byteStart) mask &= headMask;
-              if (b == byteEnd)   mask &= tailMask;
-            }
-            rowPtr[b] &= ~mask;  // clear drawn bits
-          }
-        }
-      } else if constexpr (renderMode == GfxRenderer::GRAYSCALE_LSB) {
-        // GRAYSCALE_LSB pass: dark gray only (bmpVal == 1)
-        for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-          uint8_t* rowPtr = fb + rowOff * renderer.getDisplayWidthBytes();
-          for (int b = byteStart; b <= byteEnd; b++) {
-            uint8_t mask = 0;
-            for (int p = 0; p < 8; p++) {
-              const int pixelIdx = pixelOffset + b * 4 + p / 2;
-              if (pixelIdx < width) {
-                const uint8_t byte = bitmap[pixelIdx >> 2];
-                const uint8_t val = ((byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3);
-                const uint8_t bmpVal = 3 - val;
-                if (bmpVal == 1) {
-                  mask |= (1 << (7 - p));
-                }
-              }
-            }
-            if (b == byteStart && b == byteEnd) {
-              mask &= headMask;
-            } else {
-              if (b == byteStart) mask &= headMask;
-              if (b == byteEnd)   mask &= tailMask;
-            }
-            rowPtr[b] |= mask;  // set drawn bits for grayscale
-          }
-        }
-      } else {  // GRAYSCALE_MSB
-        // GRAYSCALE_MSB pass: dark + light gray (bmpVal == 1 || bmpVal == 2)
-        for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-          uint8_t* rowPtr = fb + rowOff * renderer.getDisplayWidthBytes();
-          for (int b = byteStart; b <= byteEnd; b++) {
-            uint8_t mask = 0;
-            for (int p = 0; p < 8; p++) {
-              const int pixelIdx = pixelOffset + b * 4 + p / 2;
-              if (pixelIdx < width) {
-                const uint8_t byte = bitmap[pixelIdx >> 2];
-                const uint8_t val = ((byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3);
-                const uint8_t bmpVal = 3 - val;
-                if (bmpVal == 1 || bmpVal == 2) {
-                  mask |= (1 << (7 - p));
-                }
-              }
-            }
-            if (b == byteStart && b == byteEnd) {
-              mask &= headMask;
-            } else {
-              if (b == byteStart) mask &= headMask;
-              if (b == byteEnd)   mask &= tailMask;
-            }
-            rowPtr[b] |= mask;  // set drawn bits for grayscale
-          }
-        }
+      // Dispatch to byte-aligned row processor — constexpr-if on renderMode eliminates
+      // dead branches at compile time, so a single loop covers all three passes.
+      for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
+        renderCharRow2Bit<orientation, rotation, renderMode>(
+            fb + rowOff * renderer.getDisplayWidthBytes(),
+            bitmap, rowOff, byteStart, byteEnd, headMask, tailMask, width, pixelOffset);
       }
     }
   } else {
@@ -547,30 +475,11 @@ static void renderCharImpl(const GfxRenderer& renderer,
       // Pixel offset into the bitmap for this row (8 pixels per bitmap byte for 1-bit)
       const int pixelOffset = glyphY * ((width + 7) / 8);
 
-      // BW only — grayscale passes are no-ops for 1-bit fonts.
-      // FB bit: 0 = ink (black), 1 = no-ink (white).
-      // mask has 1-bits where pixels should be drawn → clear those bits.
+      // Dispatch to byte-aligned row processor — BW only, grayscale passes are no-ops.
       for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-        uint8_t* rowPtr = fb + rowOff * renderer.getDisplayWidthBytes();
-        for (int b = byteStart; b <= byteEnd; b++) {
-          uint8_t mask = 0;
-          for (int p = 0; p < 8; p++) {
-            const int pixelIdx = pixelOffset + b * 8 + p;
-            if (pixelIdx < width) {
-              const uint8_t byte = bitmap[pixelIdx >> 3];
-              if ((byte >> (7 - (pixelIdx & 7))) & 1) {
-                mask |= (1 << (7 - p));
-              }
-            }
-          }
-          if (b == byteStart && b == byteEnd) {
-            mask &= headMask;
-          } else {
-            if (b == byteStart) mask &= headMask;
-            if (b == byteEnd)   mask &= tailMask;
-          }
-          rowPtr[b] &= ~mask;  // clear drawn bits (0 = ink)
-        }
+        renderCharRow1Bit<orientation, rotation, renderMode>(
+            fb + rowOff * renderer.getDisplayWidthBytes(),
+            bitmap, rowOff, byteStart, byteEnd, headMask, tailMask, width, pixelOffset);
       }
     }
   }

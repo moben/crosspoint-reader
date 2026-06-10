@@ -434,22 +434,17 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
 
 ### Outstanding Cleanup ❌
 
-**P0 — Eliminate code duplication by wiring `renderCharImpl` to the helpers**
+**P0 ✅ Eliminate code duplication by wiring `renderCharImpl` to the helpers**
 
-`renderCharRow1Bit` and `renderCharRow2Bit` are defined but **never called**.
-Inside `renderCharImpl`, the same row-processing logic is duplicated inline
-(2-bit path at `GfxRenderer.cpp:~220-290`, 1-bit path at `~340-400`).
-
-**Fix**: Replace the inline row loops in `renderCharImpl` with calls to
+DONE. Replaced the inline row loops in `renderCharImpl` with calls to
 `renderCharRow1Bit<orientation, rotation, renderMode>(...)` and
-`renderCharRow2Bit<orientation, rotation, renderMode>(...)`. This matches
-the original plan and eliminates ~120 lines of duplicated code.
+`renderCharRow2Bit<orientation, rotation, renderMode>(...)`. Eliminates ~120
+lines of duplicated code. The helpers are now actively called from both branches.
 
-The helper signatures already accept `<orientation, rotation, renderMode>` —
-the template parameters are accepted but currently unused in the helper bodies
-(because the helpers are dead code). Once wired up, the orientation and rotation
-params will be threaded through properly, enabling full compile-time DCE of
-dead branches within the helpers as well.
+The template parameters `<orientation, rotation, renderMode>` are threaded
+through properly, enabling full compile-time DCE of dead branches within the
+helpers (e.g., GRAYSCALE_LSB/GRAYSCALE_MSB arms in `renderCharRow1Bit` are
+eliminated since 1-bit fonts only ever run BW).
 
 **P1 — `renderCharScaled` still pixel-by-pixel (deferred, in scope)**
 
