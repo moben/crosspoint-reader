@@ -6,8 +6,7 @@
 // applies head/tail masks, then performs exactly ONE read-modify-write on
 // the framebuffer.  Eliminates all per-pixel drawPixel() calls and RMWs.
 // ---------------------------------------------------------------------------
-template <GfxRenderer::Orientation orientation, TextRotation rotation,
-          GfxRenderer::RenderMode renderMode>
+template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
 __attribute__((always_inline)) static inline void renderCharRow1Bit(uint8_t* const fb,
                               const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
@@ -44,8 +43,7 @@ __attribute__((always_inline)) static inline void renderCharRow1Bit(uint8_t* con
 // single mask per renderMode pass, applies head/tail masks, then performs
 // exactly ONE RMW per framebuffer byte.
 // ---------------------------------------------------------------------------
-template <GfxRenderer::Orientation orientation, TextRotation rotation,
-          GfxRenderer::RenderMode renderMode>
+template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
 __attribute__((always_inline)) static inline void renderCharRow2Bit(uint8_t* const fb,
                               const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
@@ -95,7 +93,7 @@ __attribute__((always_inline)) static inline void renderCharRow2Bit(uint8_t* con
 // ---------------------------------------------------------------------------
 // Byte-aligned renderCharImpl — orientation-specialized template
 // ---------------------------------------------------------------------------
-// Adds <orientation, rotation, renderMode> as template parameters so that:
+// Adds <orientation, renderMode> as template parameters so that:
 //   - Physical coordinate math is fully inlined (no runtime switch)
 //     rotateCoordinates() is always_inline; with a constant orientation the
 //     compiler DCEs all dead switch arms at compile time.
@@ -103,8 +101,7 @@ __attribute__((always_inline)) static inline void renderCharRow2Bit(uint8_t* con
 //   - The three-pass grayscale architecture stays at the activity level
 // ---------------------------------------------------------------------------
 
-template <GfxRenderer::Orientation orientation, TextRotation rotation,
-          GfxRenderer::RenderMode renderMode>
+template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
 static void renderCharImpl(const GfxRenderer& renderer,
                            const EpdFontFamily& fontFamily, const uint32_t cp,
                            int cursorX, int cursorY,
@@ -125,6 +122,7 @@ static void renderCharImpl(const GfxRenderer& renderer,
   // Tiled-grayscale band culling: if this glyph's physical y-extent is entirely
   // outside the active strip, skip it before the expensive bitmap decode. This
   // is what makes per-band re-rendering cheap. No-op outside strip mode.
+  // FIXME: should use orientation, not rotation
   if constexpr (rotation == TextRotation::Rotated90CW) {
     const int ob = cursorX + fontData->ascender - top;
     const int ib = cursorY - left;
@@ -160,6 +158,7 @@ static void renderCharImpl(const GfxRenderer& renderer,
       //   Normal:     logY = outerBase+glyphY,  logX ∈ [innerBase .. innerBase+width-1]
       //   Rotated90CW: screenX = outerBase+glyphY, screenY ∈ [innerBase-(innerBase), innerBase-(innerBase+width-1)]
       int logY0, logY1, logX0, logX1;
+      // FIXME: should use orientation, not rotation
       if constexpr (rotation == TextRotation::Rotated90CW) {
         // outerBase = cursorX + fontData->ascender - top  → this is screenX for rotated
         // innerBase = cursorY - left                       → this is screenY base
@@ -208,7 +207,7 @@ static void renderCharImpl(const GfxRenderer& renderer,
       // Dispatch to byte-aligned row processor — constexpr-if on renderMode eliminates
       // dead branches at compile time, so a single loop covers all three passes.
       for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-        renderCharRow2Bit<orientation, rotation, renderMode>(
+        renderCharRow2Bit<orientation, renderMode>(
             fb + rowOff * renderer.getDisplayWidthBytes(),
             bitmap, rowOff, byteStart, byteEnd, headMask, tailMask, width, pixelOffset);
       }
@@ -217,6 +216,7 @@ static void renderCharImpl(const GfxRenderer& renderer,
     // --- 1-bit: byte-aligned row processor ---
     for (int glyphY = 0; glyphY < height; glyphY++) {
       int logY0, logY1, logX0, logX1;
+      // FIXME: should use orientation, not rotation
       if constexpr (rotation == TextRotation::Rotated90CW) {
         const int screenX = outerBase + glyphY;
         logY0 = innerBase - (width - 1);
@@ -262,7 +262,7 @@ static void renderCharImpl(const GfxRenderer& renderer,
 
       // Dispatch to byte-aligned row processor — BW only, grayscale passes are no-ops.
       for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-        renderCharRow1Bit<orientation, rotation, renderMode>(
+        renderCharRow1Bit<orientation, renderMode>(
             fb + rowOff * renderer.getDisplayWidthBytes(),
             bitmap, rowOff, byteStart, byteEnd, headMask, tailMask, width, pixelOffset);
       }
@@ -271,11 +271,11 @@ static void renderCharImpl(const GfxRenderer& renderer,
 }
 
 
-// Runtime dispatch helper — routes to the correct <orientation, rotation, renderMode>
+// Runtime dispatch helper — routes to the correct <orientation, renderMode>
 // template instantiation. orientation and renderMode are runtime values on GfxRenderer
 // but constant for the duration of a single drawText call, so the switch executes once
 // per character (not per pixel).
-__attribute__((always_inline)) static inline void dispatchRenderCharImpl(const GfxRenderer& renderer, TextRotation rotation,
+__attribute__((always_inline)) static inline void dispatchRenderCharImpl(const GfxRenderer& renderer,
                                           const EpdFontFamily& fontFamily, uint32_t cp,
                                           int cursorX, int cursorY, bool black,
                                           EpdFontFamily::Style style) {
@@ -283,15 +283,15 @@ __attribute__((always_inline)) static inline void dispatchRenderCharImpl(const G
     case GfxRenderer::Portrait:
       switch (renderer.getRenderMode()) {
         case GfxRenderer::BW:
-          renderCharImpl<GfxRenderer::Portrait, TextRotation::None, GfxRenderer::BW>(
+          renderCharImpl<GfxRenderer::Portrait, GfxRenderer::BW>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_LSB:
-          renderCharImpl<GfxRenderer::Portrait, TextRotation::None, GfxRenderer::GRAYSCALE_LSB>(
+          renderCharImpl<GfxRenderer::Portrait, GfxRenderer::GRAYSCALE_LSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_MSB:
-          renderCharImpl<GfxRenderer::Portrait, TextRotation::None, GfxRenderer::GRAYSCALE_MSB>(
+          renderCharImpl<GfxRenderer::Portrait, GfxRenderer::GRAYSCALE_MSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
       }
@@ -299,15 +299,15 @@ __attribute__((always_inline)) static inline void dispatchRenderCharImpl(const G
     case GfxRenderer::LandscapeClockwise:
       switch (renderer.getRenderMode()) {
         case GfxRenderer::BW:
-          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::None, GfxRenderer::BW>(
+          renderCharImpl<GfxRenderer::LandscapeClockwise, GfxRenderer::BW>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_LSB:
-          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::None, GfxRenderer::GRAYSCALE_LSB>(
+          renderCharImpl<GfxRenderer::LandscapeClockwise, GfxRenderer::GRAYSCALE_LSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_MSB:
-          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::None, GfxRenderer::GRAYSCALE_MSB>(
+          renderCharImpl<GfxRenderer::LandscapeClockwise, GfxRenderer::GRAYSCALE_MSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
       }
@@ -315,15 +315,15 @@ __attribute__((always_inline)) static inline void dispatchRenderCharImpl(const G
     case GfxRenderer::PortraitInverted:
       switch (renderer.getRenderMode()) {
         case GfxRenderer::BW:
-          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::None, GfxRenderer::BW>(
+          renderCharImpl<GfxRenderer::PortraitInverted, GfxRenderer::BW>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_LSB:
-          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::None, GfxRenderer::GRAYSCALE_LSB>(
+          renderCharImpl<GfxRenderer::PortraitInverted, GfxRenderer::GRAYSCALE_LSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_MSB:
-          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::None, GfxRenderer::GRAYSCALE_MSB>(
+          renderCharImpl<GfxRenderer::PortraitInverted, GfxRenderer::GRAYSCALE_MSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
       }
@@ -331,15 +331,15 @@ __attribute__((always_inline)) static inline void dispatchRenderCharImpl(const G
     case GfxRenderer::LandscapeCounterClockwise:
       switch (renderer.getRenderMode()) {
         case GfxRenderer::BW:
-          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::None, GfxRenderer::BW>(
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, GfxRenderer::BW>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_LSB:
-          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::None, GfxRenderer::GRAYSCALE_LSB>(
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, GfxRenderer::GRAYSCALE_LSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_MSB:
-          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::None, GfxRenderer::GRAYSCALE_MSB>(
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, GfxRenderer::GRAYSCALE_MSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
       }
@@ -355,15 +355,15 @@ __attribute__((always_inline)) static inline void dispatchRenderCharImplRotated(
     case GfxRenderer::Portrait:
       switch (renderer.getRenderMode()) {
         case GfxRenderer::BW:
-          renderCharImpl<GfxRenderer::Portrait, TextRotation::Rotated90CW, GfxRenderer::BW>(
+          renderCharImpl<GfxRenderer::Portrait, GfxRenderer::BW>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_LSB:
-          renderCharImpl<GfxRenderer::Portrait, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_LSB>(
+          renderCharImpl<GfxRenderer::Portrait, GfxRenderer::GRAYSCALE_LSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_MSB:
-          renderCharImpl<GfxRenderer::Portrait, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_MSB>(
+          renderCharImpl<GfxRenderer::Portrait, GfxRenderer::GRAYSCALE_MSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
       }
@@ -371,15 +371,15 @@ __attribute__((always_inline)) static inline void dispatchRenderCharImplRotated(
     case GfxRenderer::LandscapeClockwise:
       switch (renderer.getRenderMode()) {
         case GfxRenderer::BW:
-          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::Rotated90CW, GfxRenderer::BW>(
+          renderCharImpl<GfxRenderer::LandscapeClockwise, GfxRenderer::BW>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_LSB:
-          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_LSB>(
+          renderCharImpl<GfxRenderer::LandscapeClockwise, GfxRenderer::GRAYSCALE_LSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_MSB:
-          renderCharImpl<GfxRenderer::LandscapeClockwise, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_MSB>(
+          renderCharImpl<GfxRenderer::LandscapeClockwise, GfxRenderer::GRAYSCALE_MSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
       }
@@ -387,15 +387,15 @@ __attribute__((always_inline)) static inline void dispatchRenderCharImplRotated(
     case GfxRenderer::PortraitInverted:
       switch (renderer.getRenderMode()) {
         case GfxRenderer::BW:
-          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::Rotated90CW, GfxRenderer::BW>(
+          renderCharImpl<GfxRenderer::PortraitInverted, GfxRenderer::BW>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_LSB:
-          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_LSB>(
+          renderCharImpl<GfxRenderer::PortraitInverted, GfxRenderer::GRAYSCALE_LSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_MSB:
-          renderCharImpl<GfxRenderer::PortraitInverted, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_MSB>(
+          renderCharImpl<GfxRenderer::PortraitInverted, GfxRenderer::GRAYSCALE_MSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
       }
@@ -403,15 +403,15 @@ __attribute__((always_inline)) static inline void dispatchRenderCharImplRotated(
     case GfxRenderer::LandscapeCounterClockwise:
       switch (renderer.getRenderMode()) {
         case GfxRenderer::BW:
-          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::Rotated90CW, GfxRenderer::BW>(
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, GfxRenderer::BW>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_LSB:
-          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_LSB>(
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, GfxRenderer::GRAYSCALE_LSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
         case GfxRenderer::GRAYSCALE_MSB:
-          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, TextRotation::Rotated90CW, GfxRenderer::GRAYSCALE_MSB>(
+          renderCharImpl<GfxRenderer::LandscapeCounterClockwise, GfxRenderer::GRAYSCALE_MSB>(
               renderer, fontFamily, cp, cursorX, cursorY, black, style);
           break;
       }
