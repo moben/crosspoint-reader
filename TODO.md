@@ -26,8 +26,7 @@ A static template function that processes one glyph row by iterating over frameb
 
 ```cpp
 // For 1-bit mode:
-template <GfxRenderer::Orientation orientation, TextRotation rotation,
-          GfxRenderer::RenderMode renderMode>
+template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
 static void renderCharRow1Bit(const uint8_t* fb,
                               const uint8_t* bitmap,
                               int rowOffset, int byteStart, int byteEnd,
@@ -35,8 +34,7 @@ static void renderCharRow1Bit(const uint8_t* fb,
                               int glyphWidth, int pixelOffset);
 
 // For 2-bit mode:
-template <GfxRenderer::Orientation orientation, TextRotation rotation,
-          GfxRenderer::RenderMode renderMode>
+template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
 static void renderCharRow2Bit(const uint8_t* fb,
                               const uint8_t* bitmap,
                               int rowOffset, int byteStart, int byteEnd,
@@ -186,8 +184,7 @@ Both `orientation` and `renderMode` are template parameters, so the compiler can
 all dead branches — no runtime `switch` on orientation, no runtime comparison on renderMode.
 
 ```cpp
-template <GfxRenderer::Orientation orientation, TextRotation rotation,
-          GfxRenderer::RenderMode renderMode>
+template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
 static void renderCharImpl(const GfxRenderer& renderer, ...) {
     // --- Glyph lookup (unchanged) ---
     const EpdGlyph* glyph = fontFamily.getGlyph(cp, style);
@@ -217,9 +214,9 @@ static void renderCharImpl(const GfxRenderer& renderer, ...) {
 
         // Dispatch to byte-aligned row processor
         if (fontData->is2Bit)
-            renderCharRow2Bit<orientation, rotation, renderMode>(...);
+            renderCharRow2Bit<orientation, renderMode>(...);
         else
-            renderCharRow1Bit<orientation, rotation, renderMode>(...);
+            renderCharRow1Bit<orientation, renderMode>(...);
     }
 }
 ```
@@ -240,45 +237,45 @@ void drawText(const int fontId, const int x, const int y, const char* text, ...)
     switch (orientation) {
         case Portrait:
             switch (renderMode) {
-                case BW:           renderCharImpl<Portrait, TextRotation::None, BW>(...); break;
-                case GRAYSCALE_LSB: renderCharImpl<Portrait, TextRotation::None, GRAYSCALE_LSB>(...); break;
-                case GRAYSCALE_MSB: renderCharImpl<Portrait, TextRotation::None, GRAYSCALE_MSB>(...); break;
+                case BW:           renderCharImpl<Portrait, BW>(...); break;
+                case GRAYSCALE_LSB: renderCharImpl<Portrait, GRAYSCALE_LSB>(...); break;
+                case GRAYSCALE_MSB: renderCharImpl<Portrait, GRAYSCALE_MSB>(...); break;
             }
             break;
         case LandscapeClockwise:
             switch (renderMode) {
-                case BW:           renderCharImpl<LandscapeClockwise, TextRotation::None, BW>(...); break;
-                case GRAYSCALE_LSB: renderCharImpl<LandscapeClockwise, TextRotation::None, GRAYSCALE_LSB>(...); break;
-                case GRAYSCALE_MSB: renderCharImpl<LandscapeClockwise, TextRotation::None, GRAYSCALE_MSB>(...); break;
+                case BW:           renderCharImpl<LandscapeClockwise, BW>(...); break;
+                case GRAYSCALE_LSB: renderCharImpl<LandscapeClockwise, GRAYSCALE_LSB>(...); break;
+                case GRAYSCALE_MSB: renderCharImpl<LandscapeClockwise, GRAYSCALE_MSB>(...); break;
             }
             break;
         case PortraitInverted:
             switch (renderMode) {
-                case BW:           renderCharImpl<PortraitInverted, TextRotation::None, BW>(...); break;
-                case GRAYSCALE_LSB: renderCharImpl<PortraitInverted, TextRotation::None, GRAYSCALE_LSB>(...); break;
-                case GRAYSCALE_MSB: renderCharImpl<PortraitInverted, TextRotation::None, GRAYSCALE_MSB>(...); break;
+                case BW:           renderCharImpl<PortraitInverted, BW>(...); break;
+                case GRAYSCALE_LSB: renderCharImpl<PortraitInverted, GRAYSCALE_LSB>(...); break;
+                case GRAYSCALE_MSB: renderCharImpl<PortraitInverted, GRAYSCALE_MSB>(...); break;
             }
             break;
         case LandscapeCounterClockwise:
             switch (renderMode) {
-                case BW:           renderCharImpl<LandscapeCounterClockwise, TextRotation::None, BW>(...); break;
-                case GRAYSCALE_LSB: renderCharImpl<LandscapeCounterClockwise, TextRotation::None, GRAYSCALE_LSB>(...); break;
-                case GRAYSCALE_MSB: renderCharImpl<LandscapeCounterClockwise, TextRotation::None, GRAYSCALE_MSB>(...); break;
+                case BW:           renderCharImpl<LandscapeCounterClockwise, BW>(...); break;
+                case GRAYSCALE_LSB: renderCharImpl<LandscapeCounterClockwise, GRAYSCALE_LSB>(...); break;
+                case GRAYSCALE_MSB: renderCharImpl<LandscapeCounterClockwise, GRAYSCALE_MSB>(...); break;
             }
             break;
     }
 }
 ```
 
-Similarly, `drawTextRotated90CW` dispatches to the `Rotated90CW` variants:
+Similarly, `drawTextRotated90CW` dispatches via `dispatchRenderCharImplRotated()`:
 ```cpp
 // In drawTextRotated90CW:
 switch (orientation) {
     case Portrait:
         switch (renderMode) {
-            case BW:           renderCharImpl<Portrait, TextRotation::Rotated90CW, BW>(...); break;
-            case GRAYSCALE_LSB: renderCharImpl<Portrait, TextRotation::Rotated90CW, GRAYSCALE_LSB>(...); break;
-            case GRAYSCALE_MSB: renderCharImpl<Portrait, TextRotation::Rotated90CW, GRAYSCALE_MSB>(...); break;
+            case BW:           renderCharImpl<Portrait, BW>(...); break;
+            case GRAYSCALE_LSB: renderCharImpl<Portrait, GRAYSCALE_LSB>(...); break;
+            case GRAYSCALE_MSB: renderCharImpl<Portrait, GRAYSCALE_MSB>(...); break;
         }
         break;
     // ... 3 more orientation cases
@@ -287,18 +284,18 @@ switch (orientation) {
 
 ### 5. Compile-Time Orientation Specialization
 
-The template `<orientation, rotation, renderMode>` produces exactly **24 instantiations**
-(4 orientations × 2 rotations × 3 render modes). Each has the coordinate math fully inlined
+The template `<orientation, renderMode>` produces exactly **12 instantiations**
+(4 orientations × 3 render modes). Each has the coordinate math fully inlined
 — no runtime `switch` in the pixel loop.
 
 The compiler will eliminate dead branches (e.g., the `switch` for `orientation`
-and `renderMode` become single arithmetic expressions). **All 24 instantiations
+and `renderMode` become single arithmetic expressions). **All 12 instantiations
 are always emitted** because the dispatch `switch` in `drawText` references
 all of them. The compiler cannot prune any, even for 1-bit fonts where
 GRAYSCALE_LSB/GRAYSCALE_MSB are never called — the switch cases still exist and
 the linker sees them as reachable.
 
-This is acceptable: 24 × ~80 bytes ≈ **~2 KB** of code size, which is negligible against
+This is acceptable: 12 × ~80 bytes ≈ **~1 KB** of code size, which is negligible against
 the ESP32-C3's 16 MB flash.
 
 ## Expected Performance Improvement per Render Pass
@@ -385,8 +382,8 @@ Already handled transparently by `getWriteTarget()` and `getWriteOriginY()`:
 
 ### Code Size Budget
 
-24 template instantiations × ~80 bytes each ≈ **~2 KB** of code size. This is acceptable
-against the ESP32-C3's 16 MB flash. All 24 are always emitted (the dispatch switch in
+12 template instantiations × ~80 bytes each ≈ **~1 KB** of code size. This is acceptable
+against the ESP32-C3's 16 MB flash. All 12 are always emitted (the dispatch switch in
 `drawText` references all of them, so the linker sees them as reachable even for 1-bit
 fonts where grayscale instantiations are never called).
 
@@ -407,26 +404,26 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
 ### Completed ✅
 
 1. ✅ **Create `renderCharRow1Bit`** template — byte-aligned 1-bit row processor with head/tail masks (§2).
-   Template params: `<orientation, rotation, renderMode>`.
+   Template params: `<orientation, renderMode>`.
    **Status**: Defined at `GfxRenderer.cpp:~79-108`.
 
 2. ✅ **Create `renderCharRow2Bit`** template — byte-aligned 2-bit row processor (§3).
    Uses `constexpr-if` on `renderMode`, applies head/tail masks, performs single RMW.
    **Status**: Defined at `GfxRenderer.cpp:~115-162`.
 
-3. ✅ **`renderCharImpl` refactored** — now a template `<orientation, rotation, renderMode>`
-   with byte-aligned row processing. Orientation rotation, strip target, and physical
+3. ✅ **`renderCharImpl` refactored** — now a template `<orientation, renderMode>`
+   with byte-aligned row processing. Orientation, Strip target and physical
    coordinates are hoisted upfront. Per-row byte range and head/tail masks are computed
    before the row loop.
    **Status**: Defined at `GfxRenderer.cpp:~170-500`.
 
 4. ✅ **Runtime dispatch wrappers** — `dispatchRenderCharImpl()` and
    `dispatchRenderCharImplRotated()` implement the nested `switch` over orientation
-   and renderMode (24 total cases, 12 per function).
+   and renderMode (12 total cases, 6 per function).
    **Status**: Both defined and actively used by `drawText()` and
    `drawTextRotated90CW()`.
 
-5. ⏳ **Verify correctness** — pending device testing on all 24 orientation/rotation/mode
+5. ⏳ **Verify correctness** — pending device testing on all 12 orientation/mode
    combinations.
 
 6. ⏳ **Benchmark** — pending profiling with the existing `start_ms` timing in `clearScreen`.
@@ -441,14 +438,14 @@ than `renderCharImpl`. Out of scope for this PR.
 
 ### Pending Verification
 
-5. **Verify correctness** — test all 24 orientation/rotation/mode combinations
+5. **Verify correctness** — test all 12 orientation/mode combinations
    against existing output on device.
 6. **Benchmark** — measure rendering time improvement with profiling.
 
 ## Files to Modify
 
 - `lib/GfxRenderer/GfxRenderer.cpp`:
-  - Replace the pixel-loop `renderCharImpl<TextRotation::None>` and `renderCharImpl<TextRotation::Rotated90CW>` with the byte-aligned `<orientation, rotation, renderMode>` versions
+  - Replace the pixel-loop `renderCharImpl<TextRotation::None>` and `renderCharImpl<TextRotation::Rotated90CW>` with the byte-aligned `<orientation, renderMode>` versions
   - Add `renderCharRow1Bit` and `renderCharRow2Bit` helper templates
   - Add nested `switch` dispatch in `drawText()` and `drawTextRotated90CW()` to route to the correct instantiation
 - `TODO.md`: This file — tracks the optimization plan and implementation status
