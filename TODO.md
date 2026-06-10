@@ -406,51 +406,35 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
    and renderMode (12 total cases).
    **Status**: Defined at `RenderChar.h:~281-346`. Actively used by `drawText()` in `GfxRenderer.cpp:439,471`.
 
-5. ⏳ **`dispatchRenderCharImplRotated()` defined but unused** — the rotated path still uses the old pixel-loop `renderCharImplRotated90CW` in `GfxRenderer.cpp:220`. Needs to be wired up or removed.
-   **Status**: Defined at `RenderChar.h:~353-421`. Not referenced by any caller.
-
-### Outstanding Cleanup ❌
-
-**P0 — `renderCharScaled` still pixel-by-pixel (deferred, in scope)**
-
-`renderCharScaled()` (used for SUP/SUB text) still uses per-pixel `drawPixel()`
-calls. This is a known deferred optimization — it's called far less frequently
-than `renderCharImpl`. Out of scope for this PR.
-
 ### Pending Verification
-
 
 1. **Verify correctness** — test all 12 orientation/mode combinations
    against existing output on device.
-
 
 2. **Benchmark** — measure rendering time improvement with profiling.
 
 ### Pending Implementation ❌
 
-**P1 — Replace `renderCharImplRotated90CW` in `GfxRenderer.cpp:220`**
-
-The old pixel-loop `renderCharImplRotated90CW` (GfxRenderer.cpp:220) still uses per-pixel
-`drawPixel()` calls and references `TextRotation`. Callers at
-`GfxRenderer.cpp:1739,1759` need to switch to `dispatchRenderCharImplRotated()` once the
-rotated path is wired up.
-
-**P2 — Clean up `TextRotation` references in `RenderChar.h:129,165,223`**
+**P1 — Clean up `TextRotation` references in `RenderChar.h:129,165,223`**
 
 Stale `if constexpr (rotation == TextRotation::Rotated90CW)` blocks in `renderCharImpl`
 reference a `rotation` variable that is no longer defined. These are dead code paths
 that should be removed or replaced with proper orientation-based logic.
 
+**P2 — `renderCharScaled` still pixel-by-pixel (deferred, in scope)**
+
+`renderCharScaled()` (used for SUP/SUB text) still uses per-pixel `drawPixel()`
+calls. This is a known deferred optimization — it's called far less frequently
+than `renderCharImpl`. Out of scope for this PR.
+
 ## Files to Modify
 
 - `lib/GfxRenderer/RenderChar.h`:
   - New file — contains byte-aligned `renderCharRow1Bit`, `renderCharRow2Bit`, `renderCharImpl`,
-    `dispatchRenderCharImpl`, and `dispatchRenderCharImplRotated`.
+    `dispatchRenderCharImpl`.
   - Template params: `<orientation, renderMode>` (12 instantiations total).
 - `lib/GfxRenderer/GfxRenderer.cpp`:
   - **Replaced**: `drawText()` now calls `dispatchRenderCharImpl()` instead of
     the old pixel-loop `renderCharImpl<TextRotation::None>` (done at line 439, 471).
-  - **Pending**: Replace `renderCharImplRotated90CW` (line 220) with
-    `dispatchRenderCharImplRotated()` — callers at lines 1739, 1759.
   - **Pending**: Remove old `TextRotation` references (lines 140, 241, 261, 275, 310).
 - `TODO.md`: This file — tracks the optimization plan and implementation status
