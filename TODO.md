@@ -267,21 +267,6 @@ void drawText(const int fontId, const int x, const int y, const char* text, ...)
 }
 ```
 
-Similarly, `drawTextRotated90CW` dispatches via `dispatchRenderCharImplRotated()`:
-```cpp
-// In drawTextRotated90CW:
-switch (orientation) {
-    case Portrait:
-        switch (renderMode) {
-            case BW:           renderCharImpl<Portrait, BW>(...); break;
-            case GRAYSCALE_LSB: renderCharImpl<Portrait, GRAYSCALE_LSB>(...); break;
-            case GRAYSCALE_MSB: renderCharImpl<Portrait, GRAYSCALE_MSB>(...); break;
-        }
-        break;
-    // ... 3 more orientation cases
-}
-```
-
 ### 5. Compile-Time Orientation Specialization
 
 The template `<orientation, renderMode>` produces exactly **12 instantiations**
@@ -420,8 +405,7 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
 4. ✅ **Runtime dispatch wrappers** — `dispatchRenderCharImpl()` and
    `dispatchRenderCharImplRotated()` implement the nested `switch` over orientation
    and renderMode (12 total cases, 6 per function).
-   **Status**: Both defined and actively used by `drawText()` and
-   `drawTextRotated90CW()`.
+   **Status**: Both defined and actively used by `drawText()`.
 
 5. ⏳ **Verify correctness** — pending device testing on all 12 orientation/mode
    combinations.
@@ -444,7 +428,7 @@ than `renderCharImpl`. Out of scope for this PR.
 
 ## Files to Modify
 
-- `lib/GfxRenderer/GfxRenderer.cpp`:
+- `lib/GfxRenderer/RenderChar.h`:
   - Replace the pixel-loop `renderCharImpl<TextRotation::None>` and `renderCharImpl<TextRotation::Rotated90CW>` with the byte-aligned `<orientation, renderMode>` versions
   - Add `renderCharRow1Bit` and `renderCharRow2Bit` helper templates
   - Add nested `switch` dispatch in `drawText()` and `drawTextRotated90CW()` to route to the correct instantiation
