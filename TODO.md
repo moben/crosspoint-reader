@@ -390,27 +390,24 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
 
 1. ✅ **Create `renderCharRow1Bit`** template — byte-aligned 1-bit row processor with head/tail masks (§2).
    Template params: `<orientation, renderMode>`.
-   **Status**: Defined at `GfxRenderer.cpp:~79-108`.
+   **Status**: Defined at `RenderChar.h:~13-43`.
 
 2. ✅ **Create `renderCharRow2Bit`** template — byte-aligned 2-bit row processor (§3).
    Uses `constexpr-if` on `renderMode`, applies head/tail masks, performs single RMW.
-   **Status**: Defined at `GfxRenderer.cpp:~115-162`.
+   **Status**: Defined at `RenderChar.h:~46-85`.
 
 3. ✅ **`renderCharImpl` refactored** — now a template `<orientation, renderMode>`
-   with byte-aligned row processing. Orientation, Strip target and physical
+   with byte-aligned row processing. Strip target and physical
    coordinates are hoisted upfront. Per-row byte range and head/tail masks are computed
    before the row loop.
-   **Status**: Defined at `GfxRenderer.cpp:~170-500`.
+   **Status**: Defined at `RenderChar.h:~90-277`.
 
-4. ✅ **Runtime dispatch wrappers** — `dispatchRenderCharImpl()` and
-   `dispatchRenderCharImplRotated()` implement the nested `switch` over orientation
-   and renderMode (12 total cases, 6 per function).
-   **Status**: Both defined and actively used by `drawText()`.
+4. ✅ **Runtime dispatch wrapper** — `dispatchRenderCharImpl()` implements the nested `switch` over orientation
+   and renderMode (12 total cases).
+   **Status**: Defined at `RenderChar.h:~281-346`. Actively used by `drawText()` in `GfxRenderer.cpp:439,471`.
 
-5. ⏳ **Verify correctness** — pending device testing on all 12 orientation/mode
-   combinations.
-
-6. ⏳ **Benchmark** — pending profiling with the existing `start_ms` timing in `clearScreen`.
+5. ⏳ **`dispatchRenderCharImplRotated()` defined but unused** — the rotated path still uses the old pixel-loop `renderCharImplRotated90CW` in `GfxRenderer.cpp:220`. Needs to be wired up or removed.
+   **Status**: Defined at `RenderChar.h:~353-421`. Not referenced by any caller.
 
 ### Outstanding Cleanup ❌
 
@@ -422,14 +419,38 @@ than `renderCharImpl`. Out of scope for this PR.
 
 ### Pending Verification
 
-5. **Verify correctness** — test all 12 orientation/mode combinations
+
+1. **Verify correctness** — test all 12 orientation/mode combinations
    against existing output on device.
-6. **Benchmark** — measure rendering time improvement with profiling.
+
+
+2. **Benchmark** — measure rendering time improvement with profiling.
+
+### Pending Implementation ❌
+
+**P1 — Replace `renderCharImplRotated90CW` in `GfxRenderer.cpp:220`**
+
+The old pixel-loop `renderCharImplRotated90CW` (GfxRenderer.cpp:220) still uses per-pixel
+`drawPixel()` calls and references `TextRotation`. Callers at
+`GfxRenderer.cpp:1739,1759` need to switch to `dispatchRenderCharImplRotated()` once the
+rotated path is wired up.
+
+**P2 — Clean up `TextRotation` references in `RenderChar.h:129,165,223`**
+
+Stale `if constexpr (rotation == TextRotation::Rotated90CW)` blocks in `renderCharImpl`
+reference a `rotation` variable that is no longer defined. These are dead code paths
+that should be removed or replaced with proper orientation-based logic.
 
 ## Files to Modify
 
 - `lib/GfxRenderer/RenderChar.h`:
-  - Replace the pixel-loop `renderCharImpl<TextRotation::None>` and `renderCharImpl<TextRotation::Rotated90CW>` with the byte-aligned `<orientation, renderMode>` versions
-  - Add `renderCharRow1Bit` and `renderCharRow2Bit` helper templates
-  - Add nested `switch` dispatch in `drawText()` and `drawTextRotated90CW()` to route to the correct instantiation
+  - New file — contains byte-aligned `renderCharRow1Bit`, `renderCharRow2Bit`, `renderCharImpl`,
+    `dispatchRenderCharImpl`, and `dispatchRenderCharImplRotated`.
+  - Template params: `<orientation, renderMode>` (12 instantiations total).
+- `lib/GfxRenderer/GfxRenderer.cpp`:
+  - **Replaced**: `drawText()` now calls `dispatchRenderCharImpl()` instead of
+    the old pixel-loop `renderCharImpl<TextRotation::None>` (done at line 439, 471).
+  - **Pending**: Replace `renderCharImplRotated90CW` (line 220) with
+    `dispatchRenderCharImplRotated()` — callers at lines 1739, 1759.
+  - **Pending**: Remove old `TextRotation` references (lines 140, 241, 261, 275, 310).
 - `TODO.md`: This file — tracks the optimization plan and implementation status
