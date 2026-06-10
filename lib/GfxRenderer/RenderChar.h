@@ -1,3 +1,6 @@
+#pragma GCC push_options
+#pragma GCC optimize ("O3")
+
 // ---------------------------------------------------------------------------
 // Byte-aligned row processor — 1-bit fonts
 // ---------------------------------------------------------------------------
@@ -419,3 +422,4 @@ __attribute__((always_inline)) static inline void dispatchRenderCharImplRotated(
   }
 }
 
+#pragma GCC pop_options

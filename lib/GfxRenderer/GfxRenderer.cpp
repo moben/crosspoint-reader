@@ -1,3 +1,4 @@
+#pragma GCC push_options
 #pragma GCC optimize ("O3")
 
 #include "GfxRenderer.h"
@@ -1894,3 +1895,5 @@ void GfxRenderer::getOrientedViewableTRBL(int* outTop, int* outRight, int* outBo
       break;
   }
 }
+
+#pragma GCC pop_options
