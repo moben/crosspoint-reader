@@ -408,18 +408,17 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
 
 1. ✅ **Create `renderCharRow1Bit`** template — byte-aligned 1-bit row processor with head/tail masks (§2).
    Template params: `<orientation, rotation, renderMode>`.
-   **Status**: Defined at `GfxRenderer.cpp:~79-108`. **NOT YET USED** — see cleanup below.
+   **Status**: Defined at `GfxRenderer.cpp:~79-108`.
 
 2. ✅ **Create `renderCharRow2Bit`** template — byte-aligned 2-bit row processor (§3).
    Uses `constexpr-if` on `renderMode`, applies head/tail masks, performs single RMW.
-   **Status**: Defined at `GfxRenderer.cpp:~115-162`. **NOT YET USED** — see cleanup below.
+   **Status**: Defined at `GfxRenderer.cpp:~115-162`.
 
 3. ✅ **`renderCharImpl` refactored** — now a template `<orientation, rotation, renderMode>`
    with byte-aligned row processing. Orientation rotation, strip target, and physical
    coordinates are hoisted upfront. Per-row byte range and head/tail masks are computed
    before the row loop.
-   **Status**: Defined at `GfxRenderer.cpp:~170-500`. **INLINED** — the row processing
-   loops are duplicated inline rather than dispatching to `renderCharRow1Bit`/`renderCharRow2Bit`.
+   **Status**: Defined at `GfxRenderer.cpp:~170-500`.
 
 4. ✅ **Runtime dispatch wrappers** — `dispatchRenderCharImpl()` and
    `dispatchRenderCharImplRotated()` implement the nested `switch` over orientation
@@ -434,19 +433,7 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
 
 ### Outstanding Cleanup ❌
 
-**P0 ✅ Eliminate code duplication by wiring `renderCharImpl` to the helpers**
-
-DONE. Replaced the inline row loops in `renderCharImpl` with calls to
-`renderCharRow1Bit<orientation, rotation, renderMode>(...)` and
-`renderCharRow2Bit<orientation, rotation, renderMode>(...)`. Eliminates ~120
-lines of duplicated code. The helpers are now actively called from both branches.
-
-The template parameters `<orientation, rotation, renderMode>` are threaded
-through properly, enabling full compile-time DCE of dead branches within the
-helpers (e.g., GRAYSCALE_LSB/GRAYSCALE_MSB arms in `renderCharRow1Bit` are
-eliminated since 1-bit fonts only ever run BW).
-
-**P1 — `renderCharScaled` still pixel-by-pixel (deferred, in scope)**
+**P0 — `renderCharScaled` still pixel-by-pixel (deferred, in scope)**
 
 `renderCharScaled()` (used for SUP/SUB text) still uses per-pixel `drawPixel()`
 calls. This is a known deferred optimization — it's called far less frequently
