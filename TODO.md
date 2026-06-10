@@ -60,10 +60,8 @@ for (int p = 0; p < 8; p++) {
     }
 }
 
-// Apply head mask (first byte): clear bits left of glyph start
+// Apply head/tail masks (see §4 below)
 mask &= headMask;
-
-// Apply tail mask (last byte): clear bits right of glyph end
 mask &= tailMask;
 
 // Single RMW — BW only (grayscale passes are no-ops for 1-bit)
@@ -109,7 +107,7 @@ for (int p = 0; p < 8; p++) {          // 8 pixels per framebuffer byte
     }
 }
 
-// Apply head/tail masks (per-bit, same as 1-bit — see §6 below)
+// Apply head/tail masks (see §4 below)
 mask &= headMask;
 mask &= tailMask;
 
@@ -127,11 +125,6 @@ if constexpr (renderMode == GfxRenderer::BW) {
 BW and grayscale passes. In BW mode, `drawPixel(x, y, true)` clears the bit (0 = ink).
 In grayscale passes, `drawPixel(x, y, false)` sets the bit (1 = gray). The optimized
 code mirrors this: BW clears bits (`& ~mask`), grayscale sets bits (`| mask`).
-
-After the glyph row finishes, `copyGrayscaleLsbBuffers(frameBuffer)` and
-`copyGrayscaleMsbBuffers(frameBuffer)` copy the framebuffer to the two display RAM
-planes. The display hardware interprets the BW+RED combination as 4 gray levels
-(see §3a table).
 
 ### 3a. Grayscale Pass Architecture
 
@@ -274,8 +267,8 @@ The template `<orientation, renderMode>` produces exactly **12 instantiations**
 — no runtime `switch` in the pixel loop.
 
 The compiler will eliminate dead branches (e.g., the `switch` for `orientation`
-and `renderMode` become single arithmetic expressions). **All 12 instantiations
-are always emitted** because the dispatch `switch` in `drawText` references
+and `renderMode` become single arithmetic expressions). **All 12 instantiations**
+are always emitted because the dispatch `switch` in `drawText` references
 all of them. The compiler cannot prune any, even for 1-bit fonts where
 GRAYSCALE_LSB/GRAYSCALE_MSB are never called — the switch cases still exist and
 the linker sees them as reachable.
@@ -294,28 +287,13 @@ the ESP32-C3's 16 MB flash.
 
 ## Key Considerations
 
-### Head/Tail Masks — 1-bit Mode
+### Head/Tail Masks
 
-The head and tail masks isolate only the bits that fall within the glyph's physical bounds:
-
-- **Head mask** (first byte): clears bits to the left of the glyph start position
-  ```cpp
-  uint8_t headMask = 0xFF >> (startX & 7);  // e.g., startX=5 → 0xE0 (bits 2-0 cleared)
-  ```
-
-- **Tail mask** (last byte): clears bits to the right of the glyph end position
-  ```cpp
-  uint8_t tailMask = 0xFF << (7 - (endX & 7));  // e.g., endX=10 → 0x03 (bits 7-3 cleared)
-  ```
-
-- When `byteStart == byteEnd` (glyph fits in one byte), combine: `(headMask & tailMask)`
-
-### Head/Tail Masks — 2-bit Mode (Per-Bit)
-
-**Same approach as 1-bit mode.** The mask operates on individual bit positions within
-each framebuffer byte (8 pixels per byte), not nibble boundaries. This is because the
-fb layout is still **1-bit-per-pixel**; the 2-bit data from the font bitmap is decoded
-into a single mask byte where each bit corresponds to one pixel column.
+The head and tail masks isolate only the bits that fall within the glyph's physical bounds.
+This applies to both 1-bit and 2-bit fonts — the mask operates on individual bit positions
+within each framebuffer byte (8 pixels per byte), not nibble boundaries. The fb layout is
+still **1-bit-per-pixel**; the 2-bit data from the font bitmap is decoded into a single
+mask byte where each bit corresponds to one pixel column.
 
 ```cpp
 // Head mask (first byte): clear bits to the left of glyph start
@@ -332,7 +310,7 @@ if (byteStart == byteEnd) {
 }
 ```
 
-### Grayscale Mode Handling
+### Grayscale Pass Summary
 
 Grayscale rendering uses **three separate render passes** over the same glyph row, each
 computing only the mask relevant to its pass and writing to the single `frameBuffer`:
@@ -349,14 +327,8 @@ inverts between BW and grayscale passes:
 - **Grayscale**: bit 0 = no-gray, bit 1 = gray → drawn pixels get `|= mask` (set to 1)
 
 This mirrors the existing `drawPixel()` behavior: `drawPixel(x, y, true)` clears bits
-(BW), `drawPixel(x, y, false)` sets bits (grayscale).
-
-White pixels (val=3) are never drawn in any pass — their bits stay at 1 (no ink/gray).
-
-This three-pass approach matches the existing rendering pipeline: after all glyphs in a
-row are rendered, `copyGrayscaleLsbBuffers(frameBuffer)` and
-`copyGrayscaleMsbBuffers(frameBuffer)` copy the same framebuffer to the two display RAM
-planes. The hardware interprets the BW+RED combination as 4 gray levels (see §3a table).
+(BW), `drawPixel(x, y, false)` sets bits (grayscale). White pixels (val=3) are never
+drawn in any pass — their bits stay at 1 (no ink/gray).
 
 ### Strip Mode
 
@@ -364,13 +336,6 @@ Already handled transparently by `getWriteTarget()` and `getWriteOriginY()`:
 - When `_stripActive`, these return the scratch buffer pointer and its physical-row origin
 - The row offset is subtracted from the physical Y to get the scratch-buffer-relative index
 - Pixels outside the band are clipped via the strip bounds check before the byte loop
-
-### Code Size Budget
-
-12 template instantiations × ~80 bytes each ≈ **~1 KB** of code size. This is acceptable
-against the ESP32-C3's 16 MB flash. All 12 are always emitted (the dispatch switch in
-`drawText` references all of them, so the linker sees them as reachable even for 1-bit
-fonts where grayscale instantiations are never called).
 
 ### renderCharScaled — Deferred to v2
 
