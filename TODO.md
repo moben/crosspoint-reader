@@ -20,6 +20,11 @@ Process **whole bytes at a time** (8 pixels for 1-bit, 8 pixels for 2-bit — tw
 
 ## Implementation Design
 
+> **NOTE**: The design below describes the current (partial) byte-aligned implementation.
+> A future refactor will replace this "row-oriented" approach with an "orientation-aware stride"
+> architecture. See **[Future Refactoring: Orientation-Aware Stride Rendering](#future-refactoring-orientation-aware-stride-rendering)**
+> for the complete design specification.
+
 ### 1. Static Helper: `renderCharRow` Template
 
 A static template function that processes one glyph row by iterating over framebuffer bytes:
@@ -403,3 +408,48 @@ than `renderCharImpl`. Out of scope for this PR.
     the old pixel-loop `renderCharImpl<TextRotation::None>` (done at line 439, 471).
   - **Pending**: Remove old `TextRotation` references (lines 140, 241, 261, 275, 310).
 - `TODO.md`: This file — tracks the optimization plan and implementation status
+
+---
+
+## Future Refactoring: Orientation-Aware Stride Rendering
+
+*This section tracks the move from row-oriented processing to a stride-oriented architecture optimized for the ESP32-C3/E-Ink memory layout. This will replace the current "row" design described above.*
+
+### 1. Rename and Redesign Stride Helpers
+- [ ] Rename `renderCharRow1Bit`/`renderCharRow2Bit` to `renderCharStride1Bit`/`renderCharStride2Bit`.
+- [ ] Refactor `renderCharStride*` signature:
+    - Remove `headMask` and `tailMask`.
+    - Add `pixelOffset` (the starting position of the glyph in the **contiguous** byte direction).
+    - Add `glyphWidth` and `glyphHeight` to handle internal boundary masking.
+- [ ] Implement Boundary Masking within `renderCharStride*`:
+    - The function must ensure that only bits corresponding to the glyph are modified in each framebuffer byte.
+    - Use `pixelOffset` and glyph dimensions to calculate a mask for every byte being written.
+    - **Crucially**: For the first and last contiguous bytes of a glyph, the mask must exclude any bits that fall outside the glyph's logical boundaries (bits before the glyph starts or after it ends), preserving the existing state of those pixels in the framebuffer.
+
+### 2. Refactor `renderCharImpl` Architecture
+The rendering loop must switch from "Row" logic to "Stride" logic based on orientation.
+
+- [ ] **Orientation-Aware Outer Loop**:
+    - `renderCharImpl` should iterate through the **non-contiguous** dimension (e.g., in Portrait, this is the logical X-axis).
+    - For each step in the outer loop, call `renderCharStride*` to process the **contiguous** direction (e.g., in Portrait, the vertical Y-axis bytes).
+- [ ] **Pre-calculation**:
+    - Calculate the `pixelOffset` (in the contiguous direction) once per glyph before iteration begins.
+- [ ] **Contiguous Stride Logic (`renderCharStride*`)**:
+    - Use `constexpr-if` to handle bitmap indexing and stride direction based on:
+        1. Current `orientation` (compile-time constant for loop parameters like column vs row access).
+        2. Bitmap dimensions (`width`/`height`) — runtime variables, inputs to the inner contiguous stride loop.
+        3. The current iteration index (the "row" offset passed from the caller) — runtime variable, input to the inner contiguous stride loop.
+- [ ] **Loop Optimization**:
+    - Hoist strip clipping and the 2-vs-1 bit condition outside the inner loop to minimize branches.
+
+### 3. Orientation & Coordinate Handling
+- [ ] **Coordinate Transformation**:
+    - `renderCharImpl` must calculate the rotated glyph coordinates once per glyph.
+    - Pass the necessary rotation/offset information to the stride helpers so they can correctly map bitmap bits to physical framebuffer bits.
+- [ ] **Portrait Specifics**:
+    - In Portrait: Outer loop = Glyph Width; Inner loop = Glyph Height (writing whole framebuffer bytes as vertical columns).
+    - In Landscape: Outer loop = Glyph Height; Inner loop = Glyph Width (writing whole framebuffer bytes as horizontal rows).
+    - `pixelOffset` is vertical in Portrait and horizontal in Landscape.
+
+### 4. Implementation Safety & Scope
+- [ ] **Strict Scope Control**: Do **NOT** touch `renderCharScaled` or `renderCharImplRotated90CW` during this refactor; they remain in the old pixel-by-pixel mode for now.
