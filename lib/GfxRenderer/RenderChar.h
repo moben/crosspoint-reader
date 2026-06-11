@@ -126,19 +126,19 @@ static void renderCharImpl(const GfxRenderer& renderer,
   // outside the active strip, skip it before the expensive bitmap decode. This
   // is what makes per-band re-rendering cheap. No-op outside strip mode.
   // FIXME: should use orientation, not rotation
-  if constexpr (rotation == TextRotation::Rotated90CW) {
-    const int ob = cursorX + fontData->ascender - top;
-    const int ib = cursorY - left;
-    if (!renderer.glyphIntersectsStrip(ob, ib - (width - 1), ob + height - 1, ib)) {
-      return;
-    }
-  } else {
+  // if constexpr (rotation == TextRotation::Rotated90CW) {
+  //   const int ob = cursorX + fontData->ascender - top;
+  //   const int ib = cursorY - left;
+  //   if (!renderer.glyphIntersectsStrip(ob, ib - (width - 1), ob + height - 1, ib)) {
+  //     return;
+  //   }
+  // } else {
     const int gx0 = cursorX + left;
     const int gy0 = cursorY - top;
     if (!renderer.glyphIntersectsStrip(gx0, gy0, gx0 + width - 1, gy0 + height - 1)) {
       return;
     }
-  }
+  // }
 
   const uint8_t* bitmap = renderer.getGlyphBitmap(fontData, glyph);
   if (bitmap == nullptr) return;
@@ -162,20 +162,20 @@ static void renderCharImpl(const GfxRenderer& renderer,
       //   Rotated90CW: screenX = outerBase+glyphY, screenY ∈ [innerBase-(innerBase), innerBase-(innerBase+width-1)]
       int logY0, logY1, logX0, logX1;
       // FIXME: should use orientation, not rotation
-      if constexpr (rotation == TextRotation::Rotated90CW) {
-        // outerBase = cursorX + fontData->ascender - top  → this is screenX for rotated
-        // innerBase = cursorY - left                       → this is screenY base
-        const int screenX = outerBase + glyphY;
-        logY0 = innerBase - (width - 1);   // screenY at glyphX=width-1 (reversed)
-        logY1 = innerBase;                 // screenY at glyphX=0
-        logX0 = screenX;
-        logX1 = screenX;
-      } else {
+      // if constexpr (rotation == TextRotation::Rotated90CW) {
+      //   // outerBase = cursorX + fontData->ascender - top  → this is screenX for rotated
+      //   // innerBase = cursorY - left                       → this is screenY base
+      //   const int screenX = outerBase + glyphY;
+      //   logY0 = innerBase - (width - 1);   // screenY at glyphX=width-1 (reversed)
+      //   logY1 = innerBase;                 // screenY at glyphX=0
+      //   logX0 = screenX;
+      //   logX1 = screenX;
+      // } else {
         logY0 = outerBase + glyphY;
         logY1 = outerBase + glyphY;
         logX0 = innerBase;
         logX1 = innerBase + width - 1;
-      }
+      // }
 
       int px0, py0, px1, py1;
       rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.getDisplayWidth(), renderer.getDisplayHeight());
@@ -220,18 +220,18 @@ static void renderCharImpl(const GfxRenderer& renderer,
     for (int glyphY = 0; glyphY < height; glyphY++) {
       int logY0, logY1, logX0, logX1;
       // FIXME: should use orientation, not rotation
-      if constexpr (rotation == TextRotation::Rotated90CW) {
-        const int screenX = outerBase + glyphY;
-        logY0 = innerBase - (width - 1);
-        logY1 = innerBase;
-        logX0 = screenX;
-        logX1 = screenX;
-      } else {
+      // if constexpr (rotation == TextRotation::Rotated90CW) {
+      //   const int screenX = outerBase + glyphY;
+      //   logY0 = innerBase - (width - 1);
+      //   logY1 = innerBase;
+      //   logX0 = screenX;
+      //   logX1 = screenX;
+      // } else {
         logY0 = outerBase + glyphY;
         logY1 = outerBase + glyphY;
         logX0 = innerBase;
         logX1 = innerBase + width - 1;
-      }
+      // }
 
       int px0, py0, px1, py1;
       rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.getDisplayWidth(), renderer.getDisplayHeight());
