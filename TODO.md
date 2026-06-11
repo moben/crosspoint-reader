@@ -342,11 +342,20 @@ Already handled transparently by `getWriteTarget()` and `getWriteOriginY()`:
 - The row offset is subtracted from the physical Y to get the scratch-buffer-relative index
 - Pixels outside the band are clipped via the strip bounds check before the byte loop
 
-### renderCharScaled — Deferred to v2
+### Out-of-Scope Functions
 
-`renderCharScaled` (in `GfxRenderer.cpp`, used for SUP/SUB text) still uses pixel-by-pixel
-rendering with `drawPixel()` calls. It is called far less frequently than `renderCharImpl` and
-is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
+The following functions are **out of scope** for this optimization project. They remain on the
+old pixel-by-pixel code path (`drawPixel()`-based) and will not be ported to the new
+`<orientation, renderMode>` template architecture:
+
+- **`renderCharScaled`** (in `GfxRenderer.cpp`) — used for SUP/SUB text in `drawText()`.
+  Called far less frequently than `renderCharImpl`; its pixel-by-pixel rendering is acceptable.
+- **`renderCharImplRotated90CW`** (in `GfxRenderer.cpp`) — used for side-button label text
+  rendered at 90° clockwise in `drawTextRotated90CW()`. This function uses a different
+  coordinate paradigm (vertical text with reversed Y) and is actively called from theme button
+  rendering (`BaseTheme.cpp`, `LyraTheme.cpp`).
+
+These functions will be addressed in a separate follow-up PR.
 
 ### Memory Safety (ESP32-C3 RISC-V)
 
@@ -374,28 +383,26 @@ is out of scope for this optimization. Will be byte-aligned in a follow-up PR.
 
 4. ✅ **Runtime dispatch wrapper** — `dispatchRenderCharImpl()` implements the nested `switch` over orientation
    and renderMode (12 total cases).
-   **Status**: Defined at `RenderChar.h:~281-346`. Actively used by `drawText()` in `GfxRenderer.cpp:439,471`.
+   **Status**: Defined at `RenderChar.h:~281-346`. Actively used by `drawText()` in `GfxRenderer.cpp`.
 
 ### Pending Verification
 
-1. **Verify correctness** — test all 12 orientation/mode combinations
-   against existing output on device.
-
-2. **Benchmark** — measure rendering time improvement with profiling.
+- [ ] **Correctness** — test all 12 orientation/mode combinations on device (4 orientations × 3 render modes).
+- [ ] **2-bit fonts** — verify grayscale rendering of 2-bit fonts in all three passes.
+- [ ] **Strip mode** — verify band clipping works correctly with the new byte-aligned code path.
+- [ ] **Benchmark** — measure rendering time improvement with profiling.
 
 ### Pending Implementation ❌
 
-**P1 — Clean up `TextRotation` references in `RenderChar.h:129,165,223`**
+**P1 — Remove commented-out `TextRotation` remnants in `RenderChar.h:128, 164, 222`**
 
-Stale `if constexpr (rotation == TextRotation::Rotated90CW)` blocks in `renderCharImpl`
-reference a `rotation` variable that is no longer defined. These are dead code paths
-that should be removed or replaced with proper orientation-based logic.
-
-**P2 — `renderCharScaled` still pixel-by-pixel (deferred, in scope)**
-
-`renderCharScaled()` (used for SUP/SUB text) still uses per-pixel `drawPixel()`
-calls. This is a known deferred optimization — it's called far less frequently
-than `renderCharImpl`. Out of scope for this PR.
+These three blocks are leftover from the old single-function design where `renderCharImpl`
+had a `TextRotation` parameter. They are already commented out but still reference
+`TextRotation::Rotated90CW` (defined in `GfxRenderer.cpp:139`). Replace each block with
+the corresponding orientation-based logic that is now handled by the `<orientation, renderMode>`
+template parameters — the correct orientation for the old `Rotated90CW` path maps to
+`GfxRenderer::LandscapeClockwise` in the new coordinate system. The `TextRotation` enum itself can
+remain (it is still used by `renderCharImplRotated90CW`, which is out of scope).
 
 ## Files to Modify
 
@@ -405,8 +412,10 @@ than `renderCharImpl`. Out of scope for this PR.
   - Template params: `<orientation, renderMode>` (12 instantiations total).
 - `lib/GfxRenderer/GfxRenderer.cpp`:
   - **Replaced**: `drawText()` now calls `dispatchRenderCharImpl()` instead of
-    the old pixel-loop `renderCharImpl<TextRotation::None>` (done at line 439, 471).
-  - **Pending**: Remove old `TextRotation` references (lines 140, 241, 261, 275, 310).
+    the old pixel-loop path for normal text rendering. The normal text path is fully
+    in scope; `renderCharScaled` and `renderCharImplRotated90CW` remain on the old code path
+    (see [Out-of-Scope Functions](#out-of-scope-functions)).
+  - **Pending**: Remove commented-out `TextRotation` remnants from `RenderChar.h` (P1).
 - `TODO.md`: This file — tracks the optimization plan and implementation status
 
 ---
@@ -452,4 +461,4 @@ The rendering loop must switch from "Row" logic to "Stride" logic based on orien
     - `pixelOffset` is vertical in Portrait and horizontal in Landscape.
 
 ### 4. Implementation Safety & Scope
-- [ ] **Strict Scope Control**: Do **NOT** touch `renderCharScaled` or `renderCharImplRotated90CW` during this refactor; they remain in the old pixel-by-pixel mode for now.
+- [ ] **Strict Scope Control**: Do **NOT** refactor `renderCharScaled` or `renderCharImplRotated90CW` during this stride-based optimization. They remain on the old pixel-by-pixel code path and are actively used by live rendering paths (SUP/SUB text and side-button labels, respectively). See [Out-of-Scope Functions](#out-of-scope-functions).
