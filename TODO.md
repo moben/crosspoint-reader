@@ -25,14 +25,14 @@ Process **whole bytes at a time** (8 pixels for 1-bit, 8 pixels for 2-bit — tw
 > architecture. See **[Future Refactoring: Orientation-Aware Stride Rendering](#future-refactoring-orientation-aware-stride-rendering)**
 > for the complete design specification.
 
-### 1. Static Helper: `renderCharRow` Template
+### 1. Static Helper: `renderCharStride` Template
 
 A static template function that processes one glyph row by iterating over framebuffer bytes:
 
 ```cpp
 // For 1-bit mode:
 template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
-static void renderCharRow1Bit(const uint8_t* fb,
+static void renderCharStride1Bit(const uint8_t* fb,
                               const uint8_t* bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
@@ -40,7 +40,7 @@ static void renderCharRow1Bit(const uint8_t* fb,
 
 // For 2-bit mode:
 template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
-static void renderCharRow2Bit(const uint8_t* fb,
+static void renderCharStride2Bit(const uint8_t* fb,
                               const uint8_t* bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
@@ -210,11 +210,11 @@ static void renderCharImpl(const GfxRenderer& renderer, ...) {
         // Byte range and masks computed once per row
         computeByteRangeAndMasks(..., &byteStart, &byteEnd, &headMask, &tailMask);
 
-        // Dispatch to byte-aligned row processor
+        // Dispatch to byte-aligned stride processor
         if (fontData->is2Bit)
-            renderCharRow2Bit<orientation, renderMode>(...);
+            renderCharStride2Bit<orientation, renderMode>(...);
         else
-            renderCharRow1Bit<orientation, renderMode>(...);
+            renderCharStride1Bit<orientation, renderMode>(...);
     }
 }
 ```
@@ -367,11 +367,11 @@ These functions will be addressed in a separate follow-up PR.
 
 ### Completed ✅
 
-1. ✅ **Create `renderCharRow1Bit`** template — byte-aligned 1-bit row processor with head/tail masks (§2).
+1. ✅ **Create `renderCharStride1Bit`** (formerly `renderCharRow1Bit`) — byte-aligned 1-bit stride processor with head/tail masks (§2).
    Template params: `<orientation, renderMode>`.
    **Status**: Defined at `RenderChar.h:~13-43`.
 
-2. ✅ **Create `renderCharRow2Bit`** template — byte-aligned 2-bit row processor (§3).
+2. ✅ **Create `renderCharStride2Bit`** (formerly `renderCharRow2Bit`) — byte-aligned 2-bit stride processor (§3).
    Uses `constexpr-if` on `renderMode`, applies head/tail masks, performs single RMW.
    **Status**: Defined at `RenderChar.h:~46-85`.
 
@@ -407,7 +407,7 @@ remain (it is still used by `renderCharImplRotated90CW`, which is out of scope).
 ## Files to Modify
 
 - `lib/GfxRenderer/RenderChar.h`:
-  - New file — contains byte-aligned `renderCharRow1Bit`, `renderCharRow2Bit`, `renderCharImpl`,
+  - New file — contains byte-aligned `renderCharStride1Bit`, `renderCharStride2Bit`, `renderCharImpl`,
     `dispatchRenderCharImpl`.
   - Template params: `<orientation, renderMode>` (12 instantiations total).
 - `lib/GfxRenderer/GfxRenderer.cpp`:
@@ -425,7 +425,7 @@ remain (it is still used by `renderCharImplRotated90CW`, which is out of scope).
 *This section tracks the move from row-oriented processing to a stride-oriented architecture optimized for the ESP32-C3/E-Ink memory layout. This will replace the current "row" design described above.*
 
 ### 1. Rename and Redesign Stride Helpers
-- [ ] Rename `renderCharRow1Bit`/`renderCharRow2Bit` to `renderCharStride1Bit`/`renderCharStride2Bit`.
+- [x] **Rename `renderCharRow1Bit`/`renderCharRow2Bit` to `renderCharStride1Bit`/`renderCharStride2Bit`** — All function definitions, call sites, and header comments in `RenderChar.h` updated.
 - [ ] Refactor `renderCharStride*` signature:
     - Remove `headMask` and `tailMask`.
     - Add `pixelOffset` (the starting position of the glyph in the **contiguous** byte direction).

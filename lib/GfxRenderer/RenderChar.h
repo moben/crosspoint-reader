@@ -2,7 +2,7 @@
 #pragma GCC optimize ("O3")
 
 // ---------------------------------------------------------------------------
-// Byte-aligned row processor — 1-bit fonts
+// Byte-aligned stride processor — 1-bit fonts
 // ---------------------------------------------------------------------------
 // Processes one glyph row by iterating over framebuffer bytes instead of
 // pixels. For each byte: extracts up to 8 bitmap bits into a single mask,
@@ -10,7 +10,7 @@
 // the framebuffer.  Eliminates all per-pixel drawPixel() calls and RMWs.
 // ---------------------------------------------------------------------------
 template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
-__attribute__((always_inline)) static inline void renderCharRow1Bit(uint8_t* const fb,
+__attribute__((always_inline)) static inline void renderCharStride1Bit(uint8_t* const fb,
                               const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
@@ -40,14 +40,14 @@ __attribute__((always_inline)) static inline void renderCharRow1Bit(uint8_t* con
 }
 
 // ---------------------------------------------------------------------------
-// Byte-aligned row processor — 2-bit fonts
+// Byte-aligned stride processor — 2-bit fonts
 // ---------------------------------------------------------------------------
 // Extracts 8 pixels per framebuffer byte from the 2-bit bitmap, builds a
 // single mask per renderMode pass, applies head/tail masks, then performs
 // exactly ONE RMW per framebuffer byte.
 // ---------------------------------------------------------------------------
 template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
-__attribute__((always_inline)) static inline void renderCharRow2Bit(uint8_t* const fb,
+__attribute__((always_inline)) static inline void renderCharStride2Bit(uint8_t* const fb,
                               const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
                               uint8_t headMask, uint8_t tailMask,
@@ -210,7 +210,7 @@ static void renderCharImpl(const GfxRenderer& renderer,
       // Dispatch to byte-aligned row processor — constexpr-if on renderMode eliminates
       // dead branches at compile time, so a single loop covers all three passes.
       for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-        renderCharRow2Bit<orientation, renderMode>(
+        renderCharStride2Bit<orientation, renderMode>(
             fb + rowOff * renderer.getDisplayWidthBytes(),
             bitmap, rowOff, byteStart, byteEnd, headMask, tailMask, width, pixelOffset);
       }
@@ -265,7 +265,7 @@ static void renderCharImpl(const GfxRenderer& renderer,
 
       // Dispatch to byte-aligned row processor — BW only, grayscale passes are no-ops.
       for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-        renderCharRow1Bit<orientation, renderMode>(
+        renderCharStride1Bit<orientation, renderMode>(
             fb + rowOff * renderer.getDisplayWidthBytes(),
             bitmap, rowOff, byteStart, byteEnd, headMask, tailMask, width, pixelOffset);
       }
