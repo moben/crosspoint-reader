@@ -69,17 +69,26 @@ __attribute__((always_inline)) static inline void renderCharStride1Bit(uint8_t* 
 template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
 __attribute__((always_inline)) static inline void renderCharStride2Bit(uint8_t* const fb,
                               const uint8_t* const bitmap,
-                              int rowOffset, int byteStart, int byteEnd,
-                              int glyphWidth, int pixelOffset) {
+                              int glyphWidth,
+                              int glyphHeight,
+                              int pGlyphY,
+                              int pixelOffset) {
+  const auto get_ink = []() __attribute__((always_inline)) {
+    
+  };
+  const auto pMaxX = (orientation == GfxRenderer::Portrait || orientation == GfxRenderer::PortraitInverted)
+    ? glyphHeight
+    : glyphWidth;
+  const auto endByte = ((pixelOffset + pMaxX - 1) / 8);
+  
   // FB bit: 0 = ink (BW), 1 = gray (grayscale passes).
   // mask has 1-bits where pixels should be drawn.
-  for (int b = byteStart; b <= byteEnd; b++) {
+  for (int b = 0; b <= endByte; b++) {
     uint8_t mask = 0;
-    const int byteGlobalStart = pixelOffset + (b - byteStart) * 8;  // global bitmap pixel index at start of this byte
 
     for (int p = 0; p < 8; p++) {
-      const int localInByte = p - (byteGlobalStart % 8);
-      if (localInByte < 0) continue;  // bit before glyph starts in this byte
+      if (b==0 && p < pixelOffset) continue; 
+      if (b==endByte && p > (pixelOffset + pMaxX - 1) % 8) continue;
 
       const int globalPixelIdx = byteGlobalStart + p;
       if (globalPixelIdx >= glyphWidth) break;  // past the end of the glyph width
@@ -104,9 +113,9 @@ __attribute__((always_inline)) static inline void renderCharStride2Bit(uint8_t* 
 
     // BW: clear drawn bits (0 = ink). Grayscale: set drawn bits (1 = gray).
     if constexpr (renderMode == GfxRenderer::BW) {
-      fb[rowOffset + b] &= ~mask;
+      fb[b] &= ~mask;
     } else {
-      fb[rowOffset + b] |= mask;
+      fb[b] |= mask;
     }
   }
 }
@@ -144,9 +153,16 @@ static void renderCharImpl(const GfxRenderer& renderer,
   // Tiled-grayscale band culling: if this glyph's physical y-extent is entirely
   // outside the active strip, skip it before the expensive bitmap decode. This
   // is what makes per-band re-rendering cheap. No-op outside strip mode.
-  const int gx0 = cursorX + left;
-  const int gy0 = cursorY - top;
-  if (!renderer.glyphIntersectsStrip(gx0, gy0, gx0 + width - 1, gy0 + height - 1)) {
+  // 
+  // Cursor base positions for glyph rendering (logical coordinates)
+  // 
+  // TODO what is the Y direction of cursor? up or down?
+  // Also, if it's down (as indicated by `-top`), shouldn't it also be `-height`?
+  const int cursorBaseX = cursorX + left;             // logical X of glyph's left edge
+  const int cursorBaseY = cursorY - top;              // logical Y of glyph's top edge
+  const int cursorEndX  = cursorBaseX + width - 1;     // logical X of glyph's right edge
+  const int cursorEndY  = cursorBaseY + height - 1;    // logical Y of glyph's bottom edge
+  if (!renderer.glyphIntersectsStrip(cursorBaseX, cursorBaseY, cursorEndX, cursorEndY)) {
     return;
   }
 
@@ -160,51 +176,77 @@ static void renderCharImpl(const GfxRenderer& renderer,
   const uint16_t displayWidth = renderer.getDisplayWidth();
   const uint16_t displayHeight = renderer.getDisplayHeight();
 
-  // Cursor base positions for glyph rendering (logical coordinates)
-  const int cursorBaseX = cursorX + left;   // logical X of glyph's left edge
-  const int cursorBaseY = cursorY - top;    // logical Y of glyph's top edge
+  int pBaseX, pBaseY, pEndX, pEndY;
+  rotateCoordinates(orientation, cursorBaseX, cursorBaseY, &pBaseX, &pBaseY, displayWidth, displayHeight);
+  rotateCoordinates(orientation, cursorEndX, cursorEndY, &pEndX, &pEndY, displayWidth, displayHeight);
 
+  const auto [pLeftY, pRightY] = std::minmax({pBaseY, pEndY});
+  const int pClipLeftY = std::max({0, originY - pLeftY});
+  const int pClipRightY = std::max({0, pRightY - (originY+writeRows) + 1});
+  
+  // TODO can probably be expressed in terms of p*
+  const auto pMaxY = (orientation == GfxRenderer::Portrait || orientation == GfxRenderer::PortraitInverted)
+    ? width
+    : height;
+  
   if (is2Bit) {
     // --- 2-bit: byte-aligned row processor ---
-    for (int glyphY = 0; glyphY < height; glyphY++) {
-      // Each glyph row spans logical coords [cursorBaseX .. cursorBaseX+width-1] at fixed logical Y.
-      const int logY = cursorBaseY + glyphY;
-      const int logX0 = cursorBaseX;
-      const int logX1 = cursorBaseX + width - 1;
+    for (int pGlyphY = 0+pClipLeftY; pGlyphY < pMaxY-pClipRightY; pGlyphY++) {
+      const int displayPxX = pBaseX;
+      const int displayPxY = pBaseY + pGlyphY;
 
-      int px0, py0, px1, py1;
-      rotateCoordinates(orientation, logX0, logY, &px0, &py0, displayWidth, displayHeight);
-      rotateCoordinates(orientation, logX1, logY, &px1, &py1, displayWidth, displayHeight);
+      const auto fbStartPx = (displayPxY + displayPxX);
+      const auto fbStartByte = fbStartPx / 8;
+      // TODO can be hoisted if display width is a multiple of byte
+      const auto fbStartPxOffset = fbStartPx - (fbStartByte * 8);
 
-      const int phyRowMin = (py0 < py1) ? py0 : py1;
-      const int phyRowMax = (py0 > py1) ? py0 : py1;
+      renderCharStride2Bit<orientation, renderMode>(
+          fb + fbStartByte,
+          bitmap,
+          width,
+          height,
+          pGlyphY,
+          fbStartPxOffset
+      );
 
-      // Clip to strip bounds
-      if (phyRowMax < originY || phyRowMin >= originY + writeRows) continue;
+      // // Each glyph row spans logical coords [cursorBaseX .. cursorBaseX+width-1] at fixed logical Y.
+      // const int logY = cursorBaseY + glyphY;
+      // const int logX0 = cursorBaseX;
+      // const int logX1 = cursorBaseX + width - 1;
 
-      const int rowOffsetStart = std::max(phyRowMin - originY, 0);
-      const int rowOffsetEnd = std::min(phyRowMax - originY, writeRows - 1);
+      // int px0, py0, px1, py1;
+      // rotateCoordinates(orientation, logX0, logY, &px0, &py0, displayWidth, displayHeight);
+      // rotateCoordinates(orientation, logX1, logY, &px1, &py1, displayWidth, displayHeight);
 
-      // Compute physical X range for byte boundary masking
-      const int phyXMin = (px0 < px1) ? px0 : px1;
-      const int phyXMax = (px0 > px1) ? px0 : px1;
+      // const int phyRowMin = (py0 < py1) ? py0 : py1;
+      // const int phyRowMax = (py0 > py1) ? py0 : py1;
 
-      // Compute byte range within the physical row
-      const int byteStart = phyXMin >> 3;
-      const int byteEnd = phyXMax >> 3;
+      // // Clip to strip bounds
+      // if (phyRowMax < originY || phyRowMin >= originY + writeRows) continue;
 
-      // pixelOffset: total bitmap pixel index at the start of this glyph row.
-      // Always width * glyphY — the flat bitmap is stored row-major with `width` pixels per row,
-      // regardless of bit-depth (2-bit packs 4 pixels/byte but the logical stride is still `width`).
-      const int pixelOffset = glyphY * width;
+      // const int rowOffsetStart = std::max(phyRowMin - originY, 0);
+      // const int rowOffsetEnd = std::min(phyRowMax - originY, writeRows - 1);
 
-      // Dispatch to byte-aligned stride processor — constexpr-if on renderMode eliminates
-      // dead branches at compile time, so a single loop covers all three passes.
-      for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
-        renderCharStride2Bit<orientation, renderMode>(
-            fb + rowOff * renderer.getDisplayWidthBytes(),
-            bitmap, rowOff, byteStart, byteEnd, width, pixelOffset);
-      }
+      // // Compute physical X range for byte boundary masking
+      // const int phyXMin = (px0 < px1) ? px0 : px1;
+      // const int phyXMax = (px0 > px1) ? px0 : px1;
+
+      // // Compute byte range within the physical row
+      // const int byteStart = phyXMin >> 3;
+      // const int byteEnd = phyXMax >> 3;
+
+      // // pixelOffset: total bitmap pixel index at the start of this glyph row.
+      // // Always width * glyphY — the flat bitmap is stored row-major with `width` pixels per row,
+      // // regardless of bit-depth (2-bit packs 4 pixels/byte but the logical stride is still `width`).
+      // const int pixelOffset = glyphY * width;
+
+      // // Dispatch to byte-aligned stride processor — constexpr-if on renderMode eliminates
+      // // dead branches at compile time, so a single loop covers all three passes.
+      // for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
+      //   renderCharStride2Bit<orientation, renderMode>(
+      //       fb + rowOff * renderer.getDisplayWidthBytes(),
+      //       bitmap, rowOff, byteStart, byteEnd, width, pixelOffset);
+      // }
     }
   } else {
     // --- 1-bit: byte-aligned row processor ---
