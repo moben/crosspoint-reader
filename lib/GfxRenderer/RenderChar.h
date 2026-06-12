@@ -1,3 +1,16 @@
+#include "GfxRenderer.h"
+
+#include <BidiUtils.h>
+#include <FontDecompressor.h>
+#include <HalGPIO.h>
+#include <Logging.h>
+#include <SdCardFont.h>
+#include <Utf8.h>
+
+#include <algorithm>
+
+#include "FontCacheManager.h"
+
 #pragma GCC push_options
 #pragma GCC optimize ("O3")
 
