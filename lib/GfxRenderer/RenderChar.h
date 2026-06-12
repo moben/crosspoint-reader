@@ -73,13 +73,43 @@ __attribute__((always_inline)) static inline void renderCharStride2Bit(uint8_t* 
                               int glyphHeight,
                               int pGlyphY,
                               int pixelOffset) {
+  const auto get_bmpVal = [&](int pX) __attribute__((always_inline)) {
+    // glyph coords:
+    // 0 1 2 3
+    // 4 5 6 7
+    int pixelPosition;
+
+    switch (orientation) {
+      case GfxRenderer::Portrait:
+        pixelPosition = (pX * glyphWidth) + pGlyphY;
+        break;
+      case GfxRenderer::LandscapeClockwise:
+        pixelPosition = (pGlyphY * glyphWidth) + pX;
+        break;
+      case GfxRenderer::PortraitInverted:
+        // pixelPosition = (pGlyphY * glyphWidth) + pX;
+        break;
+      case GfxRenderer::LandscapeCounterClockwise:
+        // pixelPosition = (pGlyphY * glyphWidth) + pX;
+        break;
+    }
+    const auto x = (orientation == GfxRenderer::Portrait || orientation == GfxRenderer::PortraitInverted)
+      ? pGlyphY
+      : pX;
+    const auto y = (orientation == GfxRenderer::Portrait || orientation == GfxRenderer::PortraitInverted)
+      ? pX
+      : pGlyphY;
+    
+    
+  };
   const auto get_ink = []() __attribute__((always_inline)) {
     
   };
   const auto pMaxX = (orientation == GfxRenderer::Portrait || orientation == GfxRenderer::PortraitInverted)
     ? glyphHeight
     : glyphWidth;
-  const auto endByte = ((pixelOffset + pMaxX - 1) / 8);
+  const auto endByte = (pixelOffset + pMaxX - 1) / 8;
+  const auto endPxOffset = (pixelOffset + pMaxX - 1) % 8;
   
   // FB bit: 0 = ink (BW), 1 = gray (grayscale passes).
   // mask has 1-bits where pixels should be drawn.
@@ -88,7 +118,7 @@ __attribute__((always_inline)) static inline void renderCharStride2Bit(uint8_t* 
 
     for (int p = 0; p < 8; p++) {
       if (b==0 && p < pixelOffset) continue; 
-      if (b==endByte && p > (pixelOffset + pMaxX - 1) % 8) continue;
+      if (b==endByte && p > endPxOffset) continue;
 
       const int globalPixelIdx = byteGlobalStart + p;
       if (globalPixelIdx >= glyphWidth) break;  // past the end of the glyph width
