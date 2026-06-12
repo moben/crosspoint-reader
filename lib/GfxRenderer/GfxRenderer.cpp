@@ -1,6 +1,3 @@
-#pragma GCC push_options
-#pragma GCC optimize ("O3")
-
 #include "GfxRenderer.h"
 
 #include <BidiUtils.h>
@@ -13,6 +10,9 @@
 #include <algorithm>
 
 #include "FontCacheManager.h"
+
+#pragma GCC push_options
+#pragma GCC optimize ("O3")
 
 namespace {
 
