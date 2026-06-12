@@ -4,37 +4,44 @@
 // ---------------------------------------------------------------------------
 // Byte-aligned stride processor — 1-bit fonts
 // ---------------------------------------------------------------------------
-// Processes one glyph row by iterating over framebuffer bytes instead of
-// pixels. For each byte: extracts up to 8 bitmap bits into a single mask,
-// applies head/tail masks, then performs exactly ONE read-modify-write on
-// the framebuffer.  Eliminates all per-pixel drawPixel() calls and RMWs.
+// Processes one glyph row by iterating over framebuffer bytes in the physical
+// X direction. For each byte: extracts up to 8 bitmap bits into a single mask,
+// applies boundary masking derived from pixelOffset/glyphWidth (no head/tail
+// mask parameters needed), then performs exactly ONE read-modify-write on the
+// framebuffer. Eliminates all per-pixel drawPixel() calls and RMWs.
 // ---------------------------------------------------------------------------
 template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
 __attribute__((always_inline)) static inline void renderCharStride1Bit(uint8_t* const fb,
                               const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
-                              uint8_t headMask, uint8_t tailMask,
                               int glyphWidth, int pixelOffset) {
   // BW only — grayscale passes are no-ops for 1-bit fonts.
   // FB bit: 0 = ink (black), 1 = no-ink (white).
   // mask has 1-bits where pixels should be drawn → clear those bits.
+  const int firstBytePixelStart = byteStart * 8;  // physical pixel index of byteStart's LSB
+  const int lastBytePixelEnd    = (byteEnd + 1) * 8 - 1;
+
   for (int b = byteStart; b <= byteEnd; b++) {
     uint8_t mask = 0;
+    const int byteGlobalStart = pixelOffset + (b - byteStart) * 8;  // global bitmap pixel index at start of this byte
+
     for (int p = 0; p < 8; p++) {
-      const int pixelIdx = pixelOffset + b * 8 + p;
-      if (pixelIdx < glyphWidth) {
-        const uint8_t byte = bitmap[pixelIdx >> 3];
-        if ((byte >> (7 - (pixelIdx & 7))) & 1) {
-          mask |= (1 << (7 - p));  // MSB-first, aligns with FB
-        }
+      const int globalPixelIdx = byteGlobalStart + p;  // global bitmap pixel index
+
+      // Boundary check: skip if outside glyph width
+      if (globalPixelIdx >= glyphWidth) break;
+
+      // Boundary check: skip if this bit position is before the glyph starts in this byte
+      // (handles the case where the glyph starts mid-byte at byteStart)
+      const int localInByte = p - (byteGlobalStart % 8);
+      if (localInByte < 0) continue;
+
+      const uint8_t byte = bitmap[globalPixelIdx >> 3];
+      if ((byte >> (7 - (globalPixelIdx & 7))) & 1) {
+        mask |= (1 << (7 - p));  // MSB-first, aligns with FB
       }
     }
-    if (b == byteStart && b == byteEnd) {
-      mask &= headMask;  // combined head+tail for single-byte glyphs
-    } else {
-      if (b == byteStart) mask &= headMask;
-      if (b == byteEnd)   mask &= tailMask;
-    }
+
     fb[rowOffset + b] &= ~mask;  // clear drawn bits (0 = ink)
   }
 }
@@ -43,46 +50,45 @@ __attribute__((always_inline)) static inline void renderCharStride1Bit(uint8_t* 
 // Byte-aligned stride processor — 2-bit fonts
 // ---------------------------------------------------------------------------
 // Extracts 8 pixels per framebuffer byte from the 2-bit bitmap, builds a
-// single mask per renderMode pass, applies head/tail masks, then performs
-// exactly ONE RMW per framebuffer byte.
+// single mask per renderMode pass, applies boundary masking based on
+// pixelOffset/glyphWidth, then performs exactly ONE RMW per framebuffer byte.
 // ---------------------------------------------------------------------------
 template <GfxRenderer::Orientation orientation, GfxRenderer::RenderMode renderMode>
 __attribute__((always_inline)) static inline void renderCharStride2Bit(uint8_t* const fb,
                               const uint8_t* const bitmap,
                               int rowOffset, int byteStart, int byteEnd,
-                              uint8_t headMask, uint8_t tailMask,
                               int glyphWidth, int pixelOffset) {
   // FB bit: 0 = ink (BW), 1 = gray (grayscale passes).
   // mask has 1-bits where pixels should be drawn.
   for (int b = byteStart; b <= byteEnd; b++) {
     uint8_t mask = 0;
-    for (int p = 0; p < 8; p++) {
-      const int pixelIdx = pixelOffset + b * 4 + p / 2;  // 4 pixels per bitmap byte
-      if (pixelIdx < glyphWidth) {
-        const uint8_t byte = bitmap[pixelIdx >> 2];
-        const uint8_t val = ((byte >> ((3 - (pixelIdx & 3)) * 2)) & 0x3);
-        // val: 0=white, 1=light-gray, 2=dark-gray, 3=black
-        // Inverted for display: 0=black, 1=dark-grey, 2=light-grey, 3=white
-        const uint8_t bmpVal = 3 - val;
+    const int byteGlobalStart = pixelOffset + (b - byteStart) * 8;  // global bitmap pixel index at start of this byte
 
-        if constexpr (renderMode == GfxRenderer::BW) {
-          // BW pass: draw all non-white pixels (val < 3 → bmpVal > 0)
-          if (bmpVal > 0) mask |= (1 << (7 - p));
-        } else if constexpr (renderMode == GfxRenderer::GRAYSCALE_LSB) {
-          // GRAYSCALE_LSB: dark gray only (bmpVal == 1)
-          if (bmpVal == 1) mask |= (1 << (7 - p));
-        } else {  // GRAYSCALE_MSB
-          // GRAYSCALE_MSB: dark + light gray (bmpVal == 1 || bmpVal == 2)
-          if (bmpVal == 1 || bmpVal == 2) mask |= (1 << (7 - p));
-        }
+    for (int p = 0; p < 8; p++) {
+      const int localInByte = p - (byteGlobalStart % 8);
+      if (localInByte < 0) continue;  // bit before glyph starts in this byte
+
+      const int globalPixelIdx = byteGlobalStart + p;
+      if (globalPixelIdx >= glyphWidth) break;  // past the end of the glyph width
+
+      const uint8_t byte = bitmap[globalPixelIdx >> 2];
+      const uint8_t val = ((byte >> ((3 - (globalPixelIdx & 3)) * 2)) & 0x3);
+      // val: 0=white, 1=light-gray, 2=dark-gray, 3=black
+      // Inverted for display: 0=black, 1=dark-grey, 2=light-grey, 3=white
+      const uint8_t bmpVal = 3 - val;
+
+      if constexpr (renderMode == GfxRenderer::BW) {
+        // BW pass: draw all non-white pixels (val < 3 → bmpVal > 0)
+        if (bmpVal > 0) mask |= (1 << (7 - p));
+      } else if constexpr (renderMode == GfxRenderer::GRAYSCALE_LSB) {
+        // GRAYSCALE_LSB: dark gray only (bmpVal == 1)
+        if (bmpVal == 1) mask |= (1 << (7 - p));
+      } else {  // GRAYSCALE_MSB
+        // GRAYSCALE_MSB: dark + light gray (bmpVal == 1 || bmpVal == 2)
+        if (bmpVal == 1 || bmpVal == 2) mask |= (1 << (7 - p));
       }
     }
-    if (b == byteStart && b == byteEnd) {
-      mask &= headMask;
-    } else {
-      if (b == byteStart) mask &= headMask;
-      if (b == byteEnd)   mask &= tailMask;
-    }
+
     // BW: clear drawn bits (0 = ink). Grayscale: set drawn bits (1 = gray).
     if constexpr (renderMode == GfxRenderer::BW) {
       fb[rowOffset + b] &= ~mask;
@@ -125,20 +131,11 @@ static void renderCharImpl(const GfxRenderer& renderer,
   // Tiled-grayscale band culling: if this glyph's physical y-extent is entirely
   // outside the active strip, skip it before the expensive bitmap decode. This
   // is what makes per-band re-rendering cheap. No-op outside strip mode.
-  // FIXME: should use orientation, not rotation
-  // if constexpr (rotation == TextRotation::Rotated90CW) {
-  //   const int ob = cursorX + fontData->ascender - top;
-  //   const int ib = cursorY - left;
-  //   if (!renderer.glyphIntersectsStrip(ob, ib - (width - 1), ob + height - 1, ib)) {
-  //     return;
-  //   }
-  // } else {
-    const int gx0 = cursorX + left;
-    const int gy0 = cursorY - top;
-    if (!renderer.glyphIntersectsStrip(gx0, gy0, gx0 + width - 1, gy0 + height - 1)) {
-      return;
-    }
-  // }
+  const int gx0 = cursorX + left;
+  const int gy0 = cursorY - top;
+  if (!renderer.glyphIntersectsStrip(gx0, gy0, gx0 + width - 1, gy0 + height - 1)) {
+    return;
+  }
 
   const uint8_t* bitmap = renderer.getGlyphBitmap(fontData, glyph);
   if (bitmap == nullptr) return;
@@ -147,39 +144,24 @@ static void renderCharImpl(const GfxRenderer& renderer,
   uint8_t* fb = renderer.getWriteTarget();
   int originY = renderer.getWriteOriginY();
   int writeRows = renderer.getWriteRows();
+  const uint16_t displayWidth = renderer.getDisplayWidth();
+  const uint16_t displayHeight = renderer.getDisplayHeight();
 
-  // For Normal text: outer loop = glyphY (→ screenY), inner = glyphX (→ screenX)
-  // For Rotated90CW: outer loop = glyphY (→ screenX), inner = glyphX (→ screenY, reversed)
-  const int outerBase = cursorY - top;   // screenY base for Normal text
-  const int innerBase = cursorX + left;  // screenX base for Normal text
+  // Cursor base positions for glyph rendering (logical coordinates)
+  const int cursorBaseX = cursorX + left;   // logical X of glyph's left edge
+  const int cursorBaseY = cursorY - top;    // logical Y of glyph's top edge
 
   if (is2Bit) {
     // --- 2-bit: byte-aligned row processor ---
     for (int glyphY = 0; glyphY < height; glyphY++) {
-      // Compute physical Y range for this glyph row.
-      // The glyph row spans logical coords:
-      //   Normal:     logY = outerBase+glyphY,  logX ∈ [innerBase .. innerBase+width-1]
-      //   Rotated90CW: screenX = outerBase+glyphY, screenY ∈ [innerBase-(innerBase), innerBase-(innerBase+width-1)]
-      int logY0, logY1, logX0, logX1;
-      // FIXME: should use orientation, not rotation
-      // if constexpr (rotation == TextRotation::Rotated90CW) {
-      //   // outerBase = cursorX + fontData->ascender - top  → this is screenX for rotated
-      //   // innerBase = cursorY - left                       → this is screenY base
-      //   const int screenX = outerBase + glyphY;
-      //   logY0 = innerBase - (width - 1);   // screenY at glyphX=width-1 (reversed)
-      //   logY1 = innerBase;                 // screenY at glyphX=0
-      //   logX0 = screenX;
-      //   logX1 = screenX;
-      // } else {
-        logY0 = outerBase + glyphY;
-        logY1 = outerBase + glyphY;
-        logX0 = innerBase;
-        logX1 = innerBase + width - 1;
-      // }
+      // Each glyph row spans logical coords [cursorBaseX .. cursorBaseX+width-1] at fixed logical Y.
+      const int logY = cursorBaseY + glyphY;
+      const int logX0 = cursorBaseX;
+      const int logX1 = cursorBaseX + width - 1;
 
       int px0, py0, px1, py1;
-      rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.getDisplayWidth(), renderer.getDisplayHeight());
-      rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.getDisplayWidth(), renderer.getDisplayHeight());
+      rotateCoordinates(orientation, logX0, logY, &px0, &py0, displayWidth, displayHeight);
+      rotateCoordinates(orientation, logX1, logY, &px1, &py1, displayWidth, displayHeight);
 
       const int phyRowMin = (py0 < py1) ? py0 : py1;
       const int phyRowMax = (py0 > py1) ? py0 : py1;
@@ -190,52 +172,36 @@ static void renderCharImpl(const GfxRenderer& renderer,
       const int rowOffsetStart = std::max(phyRowMin - originY, 0);
       const int rowOffsetEnd = std::min(phyRowMax - originY, writeRows - 1);
 
-      // Compute physical X range for head/tail masks
-      int pxHead, pyHead, pxTail, pyTail;
-      rotateCoordinates(orientation, logX0, logY0, &pxHead, &pyHead, renderer.getDisplayWidth(), renderer.getDisplayHeight());
-      rotateCoordinates(orientation, logX1, logY0, &pxTail, &pyTail, renderer.getDisplayWidth(), renderer.getDisplayHeight());
-
-      const int phyXMin = (pxHead < pxTail) ? pxHead : pxTail;
-      const int phyXMax = (pxHead > pxTail) ? pxHead : pxTail;
+      // Compute physical X range for byte boundary masking
+      const int phyXMin = (px0 < px1) ? px0 : px1;
+      const int phyXMax = (px0 > px1) ? px0 : px1;
 
       // Compute byte range within the physical row
       const int byteStart = phyXMin >> 3;
       const int byteEnd = phyXMax >> 3;
-      const uint8_t headMask = static_cast<uint8_t>(0xFFu >> (phyXMin & 7));
-      const uint8_t tailMask = static_cast<uint8_t>(0xFFu << (7 - (phyXMax & 7)));
 
-      // Pixel offset into the bitmap for this row (4 pixels per bitmap byte for 2-bit)
+      // pixelOffset: global bitmap pixel index at the start of this glyph row.
+      // For 2-bit fonts: 4 pixels per bitmap byte.
       const int pixelOffset = glyphY * ((width + 3) / 4);
 
-      // Dispatch to byte-aligned row processor — constexpr-if on renderMode eliminates
+      // Dispatch to byte-aligned stride processor — constexpr-if on renderMode eliminates
       // dead branches at compile time, so a single loop covers all three passes.
       for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
         renderCharStride2Bit<orientation, renderMode>(
             fb + rowOff * renderer.getDisplayWidthBytes(),
-            bitmap, rowOff, byteStart, byteEnd, headMask, tailMask, width, pixelOffset);
+            bitmap, rowOff, byteStart, byteEnd, width, pixelOffset);
       }
     }
   } else {
     // --- 1-bit: byte-aligned row processor ---
     for (int glyphY = 0; glyphY < height; glyphY++) {
-      int logY0, logY1, logX0, logX1;
-      // FIXME: should use orientation, not rotation
-      // if constexpr (rotation == TextRotation::Rotated90CW) {
-      //   const int screenX = outerBase + glyphY;
-      //   logY0 = innerBase - (width - 1);
-      //   logY1 = innerBase;
-      //   logX0 = screenX;
-      //   logX1 = screenX;
-      // } else {
-        logY0 = outerBase + glyphY;
-        logY1 = outerBase + glyphY;
-        logX0 = innerBase;
-        logX1 = innerBase + width - 1;
-      // }
+      const int logY = cursorBaseY + glyphY;
+      const int logX0 = cursorBaseX;
+      const int logX1 = cursorBaseX + width - 1;
 
       int px0, py0, px1, py1;
-      rotateCoordinates(orientation, logX0, logY0, &px0, &py0, renderer.getDisplayWidth(), renderer.getDisplayHeight());
-      rotateCoordinates(orientation, logX1, logY1, &px1, &py1, renderer.getDisplayWidth(), renderer.getDisplayHeight());
+      rotateCoordinates(orientation, logX0, logY, &px0, &py0, displayWidth, displayHeight);
+      rotateCoordinates(orientation, logX1, logY, &px1, &py1, displayWidth, displayHeight);
 
       const int phyRowMin = (py0 < py1) ? py0 : py1;
       const int phyRowMax = (py0 > py1) ? py0 : py1;
@@ -246,28 +212,23 @@ static void renderCharImpl(const GfxRenderer& renderer,
       const int rowOffsetStart = std::max(phyRowMin - originY, 0);
       const int rowOffsetEnd = std::min(phyRowMax - originY, writeRows - 1);
 
-      // Compute physical X range for head/tail masks
-      int pxHead, pyHead, pxTail, pyTail;
-      rotateCoordinates(orientation, logX0, logY0, &pxHead, &pyHead, renderer.getDisplayWidth(), renderer.getDisplayHeight());
-      rotateCoordinates(orientation, logX1, logY0, &pxTail, &pyTail, renderer.getDisplayWidth(), renderer.getDisplayHeight());
-
-      const int phyXMin = (pxHead < pxTail) ? pxHead : pxTail;
-      const int phyXMax = (pxHead > pxTail) ? pxHead : pxTail;
+      // Compute physical X range for byte boundary masking
+      const int phyXMin = (px0 < px1) ? px0 : px1;
+      const int phyXMax = (px0 > px1) ? px0 : px1;
 
       // Compute byte range within the physical row
       const int byteStart = phyXMin >> 3;
       const int byteEnd = phyXMax >> 3;
-      const uint8_t headMask = static_cast<uint8_t>(0xFFu >> (phyXMin & 7));
-      const uint8_t tailMask = static_cast<uint8_t>(0xFFu << (7 - (phyXMax & 7)));
 
-      // Pixel offset into the bitmap for this row (8 pixels per bitmap byte for 1-bit)
+      // pixelOffset: global bitmap pixel index at the start of this glyph row.
+      // For 1-bit fonts: 8 pixels per bitmap byte.
       const int pixelOffset = glyphY * ((width + 7) / 8);
 
-      // Dispatch to byte-aligned row processor — BW only, grayscale passes are no-ops.
+      // Dispatch to byte-aligned stride processor — BW only, grayscale passes are no-ops.
       for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
         renderCharStride1Bit<orientation, renderMode>(
             fb + rowOff * renderer.getDisplayWidthBytes(),
-            bitmap, rowOff, byteStart, byteEnd, headMask, tailMask, width, pixelOffset);
+            bitmap, rowOff, byteStart, byteEnd, width, pixelOffset);
       }
     }
   }

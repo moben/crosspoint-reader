@@ -292,28 +292,18 @@ the ESP32-C3's 16 MB flash.
 
 ## Key Considerations
 
-### Head/Tail Masks
+### Boundary Masking (replaced head/tail masks with pixelOffset approach)
 
-The head and tail masks isolate only the bits that fall within the glyph's physical bounds.
-This applies to both 1-bit and 2-bit fonts — the mask operates on individual bit positions
-within each framebuffer byte (8 pixels per byte), not nibble boundaries. The fb layout is
-still **1-bit-per-pixel**; the 2-bit data from the font bitmap is decoded into a single
-mask byte where each bit corresponds to one pixel column.
+> **Status**: Completed. Head/tail mask parameters have been removed from `renderCharStride*`
+> signatures. Boundary masking is now performed internally using `pixelOffset` and `glyphWidth`.
 
-```cpp
-// Head mask (first byte): clear bits to the left of glyph start
-uint8_t headMask = 0xFF >> (startX & 7);  // e.g., startX=5 → 0xE0 (bits 2-0 cleared)
+The stride functions compute per-byte boundary masking internally:
+- `byteGlobalStart = pixelOffset + (b - byteStart) * 8` — bitmap pixel index at start of each framebuffer byte
+- `localInByte = p - (byteGlobalStart % 8)` — skip bits before the glyph starts in this byte
+- `globalPixelIdx >= glyphWidth` — terminate inner loop early when past the glyph's right edge
 
-// Tail mask (last byte): clear bits to the right of glyph end
-uint8_t tailMask = 0xFF << (7 - (endX & 7));  // e.g., endX=10 → 0x03 (bits 7-3 cleared)
-
-// Mid bytes: no masking needed (all 8 bits are within glyph bounds)
-// Combined mask for first-and-last byte case:
-if (byteStart == byteEnd) {
-    headMask &= tailMask;
-    tailMask = 0;  // avoid double-applying
-}
-```
+This approach works for all four orientations because `rotateCoordinates()` maps logical glyph
+bounds to physical X/Y ranges before the byte range `[byteStart, byteEnd]` is computed.
 
 ### Grayscale Pass Summary
 
@@ -385,24 +375,34 @@ These functions will be addressed in a separate follow-up PR.
    and renderMode (12 total cases).
    **Status**: Defined at `RenderChar.h:~281-346`. Actively used by `drawText()` in `GfxRenderer.cpp`.
 
-### Pending Verification
+5. ✅ **P1 — Remove commented-out `TextRotation` remnants** from `RenderChar.h`.
+   All three FIXME blocks referencing `TextRotation::Rotated90CW` have been removed.
+   The dead code paths for rotated text are no longer present. `renderCharImpl` now
+   has a single clean coordinate path per orientation, with the `TextRotation` enum
+   retained only in `GfxRenderer.cpp` where it is used by the out-of-scope
+   `renderCharImplRotated90CW`.
+
+6. ✅ **Transition from head/tail masks to pixelOffset-based boundary masking** —
+   `renderCharStride1Bit` and `renderCharStride2Bit` no longer accept `headMask`/`tailMask`
+   parameters. Instead, boundary masking is performed internally using `pixelOffset`,
+   `glyphWidth`, and per-byte global pixel index arithmetic:
+   - `byteGlobalStart = pixelOffset + (b - byteStart) * 8` computes the bitmap pixel index
+     at the start of each framebuffer byte being written.
+   - For each bit position `p`, `localInByte = p - (byteGlobalStart % 8)` determines
+     whether this bit falls before the glyph starts in its byte (skip via `continue`).
+   - `globalPixelIdx >= glyphWidth` terminates the inner loop early when past the
+     glyph's right edge, eliminating the need for a separate tail mask.
+   - This approach works correctly for all four orientations because `rotateCoordinates()`
+     already maps logical glyph bounds to physical X/Y ranges before byte range computation.
+
+### Pending Verification 🔲
+
+These items require device testing and are flagged for the human tester:
 
 - [ ] **Correctness** — test all 12 orientation/mode combinations on device (4 orientations × 3 render modes).
 - [ ] **2-bit fonts** — verify grayscale rendering of 2-bit fonts in all three passes.
 - [ ] **Strip mode** — verify band clipping works correctly with the new byte-aligned code path.
 - [ ] **Benchmark** — measure rendering time improvement with profiling.
-
-### Pending Implementation ❌
-
-**P1 — Remove commented-out `TextRotation` remnants in `RenderChar.h:128, 164, 222`**
-
-These three blocks are leftover from the old single-function design where `renderCharImpl`
-had a `TextRotation` parameter. They are already commented out but still reference
-`TextRotation::Rotated90CW` (defined in `GfxRenderer.cpp:139`). Replace each block with
-the corresponding orientation-based logic that is now handled by the `<orientation, renderMode>`
-template parameters — the correct orientation for the old `Rotated90CW` path maps to
-`GfxRenderer::LandscapeClockwise` in the new coordinate system. The `TextRotation` enum itself can
-remain (it is still used by `renderCharImplRotated90CW`, which is out of scope).
 
 ## Files to Modify
 
@@ -415,28 +415,20 @@ remain (it is still used by `renderCharImplRotated90CW`, which is out of scope).
     the old pixel-loop path for normal text rendering. The normal text path is fully
     in scope; `renderCharScaled` and `renderCharImplRotated90CW` remain on the old code path
     (see [Out-of-Scope Functions](#out-of-scope-functions)).
-  - **Pending**: Remove commented-out `TextRotation` remnants from `RenderChar.h` (P1).
-- `TODO.md`: This file — tracks the optimization plan and implementation status
 
 ---
 
 ## Future Refactoring: Orientation-Aware Stride Rendering
 
-*This section tracks the move from row-oriented processing to a stride-oriented architecture optimized for the ESP32-C3/E-Ink memory layout. This will replace the current "row" design described above.*
+*This section tracks remaining work. The head/tail → pixelOffset transition is complete.*
 
 ### 1. Rename and Redesign Stride Helpers
 - [x] **Rename `renderCharRow1Bit`/`renderCharRow2Bit` to `renderCharStride1Bit`/`renderCharStride2Bit`** — All function definitions, call sites, and header comments in `RenderChar.h` updated.
-- [ ] Refactor `renderCharStride*` signature:
-    - Remove `headMask` and `tailMask`.
-    - Add `pixelOffset` (the starting position of the glyph in the **contiguous** byte direction).
-    - Add `glyphWidth` and `glyphHeight` to handle internal boundary masking.
-- [ ] Implement Boundary Masking within `renderCharStride*`:
-    - The function must ensure that only bits corresponding to the glyph are modified in each framebuffer byte.
-    - Use `pixelOffset` and glyph dimensions to calculate a mask for every byte being written.
-    - **Crucially**: For the first and last contiguous bytes of a glyph, the mask must exclude any bits that fall outside the glyph's logical boundaries (bits before the glyph starts or after it ends), preserving the existing state of those pixels in the framebuffer.
+- [x] **Refactor `renderCharStride*` signature**: Removed `headMask` and `tailMask`. Added `pixelOffset` (bitmap pixel index at start of glyph row) and `glyphWidth` for internal boundary masking.
+- [x] **Implement Boundary Masking within `renderCharStride*`**: The function computes `byteGlobalStart = pixelOffset + (b - byteStart) * 8` per byte, then uses `localInByte = p - (byteGlobalStart % 8)` to skip bits before the glyph starts, and `globalPixelIdx >= glyphWidth` to terminate early past the glyph end.
 
 ### 2. Refactor `renderCharImpl` Architecture
-The rendering loop must switch from "Row" logic to "Stride" logic based on orientation.
+The rendering loop currently iterates over glyph rows (glyphY) for all orientations, processing horizontal bytes within each physical row. The TODO design proposes an orientation-aware outer loop that iterates over the non-contiguous dimension. This is a future optimization and has **not yet been implemented**.
 
 - [ ] **Orientation-Aware Outer Loop**:
     - `renderCharImpl` should iterate through the **non-contiguous** dimension (e.g., in Portrait, this is the logical X-axis).
