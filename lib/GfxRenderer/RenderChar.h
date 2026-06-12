@@ -193,9 +193,10 @@ static void renderCharImpl(const GfxRenderer& renderer,
       const int byteStart = phyXMin >> 3;
       const int byteEnd = phyXMax >> 3;
 
-      // pixelOffset: global bitmap pixel index at the start of this glyph row.
-      // For 2-bit fonts: 4 pixels per bitmap byte.
-      const int pixelOffset = glyphY * ((width + 3) / 4);
+      // pixelOffset: total bitmap pixel index at the start of this glyph row.
+      // Always width * glyphY — the flat bitmap is stored row-major with `width` pixels per row,
+      // regardless of bit-depth (2-bit packs 4 pixels/byte but the logical stride is still `width`).
+      const int pixelOffset = glyphY * width;
 
       // Dispatch to byte-aligned stride processor — constexpr-if on renderMode eliminates
       // dead branches at compile time, so a single loop covers all three passes.
@@ -233,9 +234,10 @@ static void renderCharImpl(const GfxRenderer& renderer,
       const int byteStart = phyXMin >> 3;
       const int byteEnd = phyXMax >> 3;
 
-      // pixelOffset: global bitmap pixel index at the start of this glyph row.
-      // For 1-bit fonts: 8 pixels per bitmap byte.
-      const int pixelOffset = glyphY * ((width + 7) / 8);
+      // pixelOffset: total bitmap pixel index at the start of this glyph row.
+      // Always width * glyphY — the flat bitmap is stored row-major with `width` pixels per row,
+      // regardless of bit-depth (1-bit packs 8 pixels/byte but the logical stride is still `width`).
+      const int pixelOffset = glyphY * width;
 
       // Dispatch to byte-aligned stride processor — BW only, grayscale passes are no-ops.
       for (int rowOff = rowOffsetStart; rowOff <= rowOffsetEnd; rowOff++) {
